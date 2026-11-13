@@ -747,6 +747,7 @@ fn make_doc(job: PrintJob, fonts: Arc<Fonts>) -> Doc {
 
 /// PDFファイルに書き出す。使ったフォントは、PDFに埋め込まれる
 fn write_pdf(doc: &Doc, path: &Path) -> Result<(), String> {
+    use printpdf::path::PaintMode;
     use printpdf::*;
     use std::io::{BufWriter, Cursor};
     let (pdf, p0, l0) = PdfDocument::new(doc.job.title.as_str(), Mm(PAGE_W as _), Mm(PAGE_H as _), "layer");
