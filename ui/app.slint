@@ -1,0 +1,1121 @@
+import { ListView, TextEdit, Palette, SpinBox } from "std-widgets.slint";
+
+export struct Edit { text: string, cursor: int }
+export struct Entry {
+    date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
+    freq: string, mode: string, power: string, name: string, qth: string, memo: string,
+    loc: string, num: string, spec: string,
+}
+export struct LogRow {
+    id: int, date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
+    freq: string, mode: string, power: string, name: string, qth: string, memo: string, memo-full: string,
+    loc: string, num: string, spec: string,
+}
+
+export global Form {
+    in-out property <string> date;
+    in-out property <string> t-start;
+    in-out property <string> t-end;
+    in-out property <string> call;
+    in-out property <string> rst-s;
+    in-out property <string> rst-r;
+    in-out property <string> freq;
+    in-out property <string> mode;
+    in-out property <string> power;
+    in-out property <string> name;
+    in-out property <string> qth;
+    in-out property <string> memo;
+    in-out property <string> loc;
+    in-out property <string> num;
+    in-out property <string> spec;
+    public function get() -> Entry {
+        return { date: date, t-start: t-start, t-end: t-end, call: call, rst-s: rst-s, rst-r: rst-r,
+                 freq: freq, mode: mode, power: power, name: name, qth: qth, memo: memo,
+                 loc: loc, num: num, spec: spec };
+    }
+    public function put(e: Entry) {
+        date = e.date; t-start = e.t-start; t-end = e.t-end; call = e.call; rst-s = e.rst-s; rst-r = e.rst-r;
+        freq = e.freq; mode = e.mode; power = e.power; name = e.name; qth = e.qth; memo = e.memo;
+        loc = e.loc; num = e.num; spec = e.spec;
+    }
+    public function set-info(l: string, n: string, s: string) { loc = l; num = n; spec = s; }
+    public function clear() {
+        date = ""; t-start = ""; t-end = ""; call = ""; rst-s = ""; rst-r = "";
+        freq = ""; mode = ""; power = ""; name = ""; qth = ""; memo = "";
+        loc = ""; num = ""; spec = "";
+    }
+}
+
+export global Backend {
+    in-out property <int> screen: 1;          // 0=入力/編集, 1=一覧
+    in-out property <bool> editing: false;
+    in-out property <bool> use-api: true;
+    in-out property <string> status;
+    in-out property <string> message;
+    in-out property <string> file-name;
+    in-out property <string> query;
+    in-out property <string> my-call;
+    in-out property <int> total-count: 0;   // リストの全件数
+    in-out property <bool> show-clock: true;
+    in-out property <bool> show-seconds: true;
+    in-out property <bool> show-popup: true;
+    in-out property <bool> preview-open: false;
+    in-out property <image> preview-image;
+    in-out property <int> preview-page: 0;
+    in-out property <int> preview-pages: 1;
+    in-out property <int> m-top: 10;
+    in-out property <int> m-bottom: 10;
+    in-out property <int> m-left: 10;
+    in-out property <int> m-right: 10;
+    // 設定メニューで編集中の値（「保存」で反映、「キャンセル」で破棄）
+    in-out property <bool> d-use-api: true;
+    in-out property <bool> d-dark: false;
+    in-out property <bool> d-clock: true;
+    in-out property <bool> d-sec: true;
+    in-out property <bool> d-popup: true;
+    in-out property <string> d-call;
+    in-out property <[bool]> d-col-show;
+    in-out property <string> clock-text;
+    in-out property <[bool]> col-show;   // 一覧・履歴に表示する項目（15個）
+    in-out property <int> focus-tick: 0;   // 日付欄へ
+    in-out property <int> end-tick: 0;     // 保存ボタンへ
+    in-out property <bool> sort-asc: true; // 一覧・履歴共通の並び順
+    in-out property <[LogRow]> rows;
+    in-out property <[LogRow]> history;
+    in-out property <[string]> freq-opts;
+    in-out property <[string]> mode-opts;
+    in-out property <[string]> power-opts;
+    callback goto(int);
+    callback menu(int, int);
+    callback lookup(string);
+    callback save();
+    callback edit-row(int);
+    callback edit-end(int);          // 0=保存して終了 1=保存せず終了 2=元に戻す 3=削除
+    callback sort(bool);
+    callback cols-changed();
+    callback settings-open();
+    callback settings-save();
+    callback preview-goto(int);
+    callback save-pdf();
+    callback margins-changed();
+    callback clear-form();
+    callback search(string);
+    callback now(int) -> string;     // 0=日付 1=時刻
+    callback step(int, string, int, int) -> Edit;
+    callback filter(int, string, int) -> Edit;
+    callback cycle(int, string, int) -> string;
+    callback byte-len(string) -> int;
+    callback last(int) -> string;    // 0=周波数 1=モード 2=出力
+}
+
+export global Theme {
+    in-out property <bool> dark: false;
+    out property <color> bg: dark ? #1e1f22 : #f6f6f6;
+    out property <color> bar: dark ? #2b2d31 : #ececec;
+    out property <color> menu-hover: dark ? #3b4a63 : #d8e6f7;
+    out property <color> pop-bg: dark ? #2b2d31 : #fafafa;
+    out property <color> pop-border: dark ? #666666 : #999999;
+    out property <color> hover: dark ? #3b4a63 : #cfe6ff;
+    out property <color> sep: dark ? #555555 : #bbbbbb;
+    out property <color> text: dark ? #e8e8e8 : #111111;
+    out property <color> text2: dark ? #b5b5b5 : #444444;
+    out property <color> text3: dark ? #a0a0a0 : #555555;
+    out property <color> field: dark ? #2b2d31 : #ffffff;
+    out property <color> field-display: dark ? #26282b : #f1f1f1;
+    out property <color> field-off: dark ? #36383c : #dcdcdc;
+    out property <color> border: dark ? #7a7a7a : #8a8a8a;
+    out property <color> focus: dark ? #4c9aff : #2a7de1;
+    out property <color> sel-bg: dark ? #2f5f9f : #bcd8ff;
+    out property <color> sel-fg: dark ? #ffffff : #000000;
+    out property <color> arrow-bg: dark ? #3a3c41 : #e6e6e6;
+    out property <color> arrow-text: dark ? #dddddd : #333333;
+    out property <color> btn: dark ? #4a4c52 : #d6d6d6;
+    out property <color> btn-text: dark ? #eeeeee : #222222;
+    out property <color> row: dark ? #25272a : #ffffff;
+    out property <color> row-shade: dark ? #2e3035 : #eeeeee;
+    out property <color> row-hover: dark ? #3b4a63 : #dce9ff;
+    out property <color> row-sel: dark ? #2f5f9f : #bcd8ff;
+    out property <color> head: dark ? #383c44 : #dde5ef;
+    out property <color> head-line: dark ? #6a7280 : #9aa5b5;
+    out property <color> tip-bg: dark ? #3a3a2a : #fffbe0;
+    out property <color> tip-text: dark ? #eeeeee : #222222;
+    out property <color> tip-border: dark ? #777777 : #999999;
+    out property <color> err: dark ? #ff7b7b : #c62828;
+}
+
+global Metrics { out property <length> cw: 12px; }
+export global Cols {
+    in-out property <length> date: 130px;
+    in-out property <length> t-start: 70px;
+    in-out property <length> t-end: 70px;
+    in-out property <length> call: 124px;
+    in-out property <length> rst-s: 60px;
+    in-out property <length> rst-r: 60px;
+    in-out property <length> freq: 76px;
+    in-out property <length> mode: 62px;
+    in-out property <length> power: 68px;
+    in-out property <length> name: 124px;
+    in-out property <length> qth: 170px;
+    in-out property <length> loc: 170px;
+    in-out property <length> num: 110px;
+    in-out property <length> spec: 170px;
+}
+
+// ---- 入力欄 ------------------------------------------------------------
+// kind: -1=通常 0=コールサイン 1=数字 2=日付 3=時刻 4=選択肢(↑↓で循環)
+component Field inherits Rectangle {
+    in property <int> kind: -1;
+    in property <int> opt-kind: -1;
+    in property <bool> mono: false;
+    in property <bool> display: false;
+    in property <bool> active: true;
+    in property <bool> locked: false;
+    in-out property <string> text <=> ti.text;
+    callback accepted();
+    in property <bool> own-tab: false;
+    callback tab-pressed();
+    callback tab-next();
+    callback tab-prev();
+    callback focus-gained();
+    callback edited();
+    public function focus-input() { ti.focus(); }
+    public function cursor-end() {
+        ti.set-selection-offsets(Backend.byte-len(ti.text), Backend.byte-len(ti.text));
+    }
+    height: 36px;
+    background: !root.active ? Theme.field-off : root.display ? Theme.field-display : Theme.field;
+    border-width: ti.has-focus ? 3px : 1px;
+    border-color: ti.has-focus ? Theme.focus : Theme.border;
+    FocusScope {
+        enabled: root.active && !root.display;
+        forward-focus: ti;
+        capture-key-pressed(e) => {
+            if (e.text == Key.UpArrow || e.text == Key.DownArrow) {
+                let d = e.text == Key.UpArrow ? 1 : -1;
+                if (root.kind == 2 || root.kind == 3) {
+                    let r = Backend.step(root.kind, ti.text, ti.cursor-position-byte-offset, d);
+                    ti.text = r.text;
+                    ti.set-selection-offsets(r.cursor, r.cursor);
+                    return EventResult.accept;
+                }
+                if (root.kind == 4) {
+                    ti.text = Backend.cycle(root.opt-kind, ti.text, d);
+                    return EventResult.accept;
+                }
+            }
+            if (root.own-tab) {
+                if (e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
+                if (e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
+                if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)) {
+                    root.tab-prev();
+                    return EventResult.accept;
+                }
+                if (e.text == Key.PageDown || (e.text == Key.Tab && !e.modifiers.shift)) {
+                    root.accepted();
+                    root.tab-next();
+                    return EventResult.accept;
+                }
+            } else if (e.text == Key.Tab && !e.modifiers.shift) {
+                root.accepted();
+            }
+            return EventResult.reject;
+        }
+        ti := TextInput {
+            x: 6px;
+            width: root.width - 12px;
+            height: root.height;
+            vertical-alignment: center;
+            enabled: root.active && !root.display;
+            read-only: root.locked;
+            font-family: root.mono ? "Consolas" : "";
+            color: Theme.text;
+            selection-background-color: Theme.sel-bg;
+            selection-foreground-color: Theme.sel-fg;
+            accepted => { root.accepted(); }
+            edited => {
+                if (root.kind >= 0 && root.kind <= 3) {
+                    let r = Backend.filter(root.kind, self.text, self.cursor-position-byte-offset);
+                    if (r.text != self.text) {
+                        self.text = r.text;
+                        self.set-selection-offsets(r.cursor, r.cursor);
+                    }
+                }
+                root.edited();
+            }
+            changed has-focus => {
+                if (self.has-focus) { root.focus-gained(); }
+            }
+        }
+    }
+}
+
+component Choice inherits Rectangle {
+    in property <[string]> options;
+    in property <int> opt-kind;
+    in property <bool> editable: false;
+    in property <bool> own-tab: false;
+    in-out property <string> text <=> bx.text;
+    callback focus-gained();
+    callback tab-next();
+    callback tab-prev();
+    public function focus-input() { bx.focus-input(); }
+    height: 36px;
+    bx := Field {
+        x: 0px; y: 0px;
+        width: root.width - 26px;
+        kind: 4;
+        opt-kind: root.opt-kind;
+        locked: !root.editable;
+        own-tab: root.own-tab;
+        tab-next => { root.tab-next(); }
+        tab-prev => { root.tab-prev(); }
+        focus-gained => { root.focus-gained(); }
+    }
+    Rectangle {
+        x: root.width - 26px; y: 0px; width: 26px; height: root.height;
+        background: Theme.arrow-bg; border-width: 1px; border-color: Theme.border;
+        Text { text: "▼"; font-size: 11px; color: Theme.arrow-text; }
+        TouchArea { clicked => { pop.show(); } }
+    }
+    pop := PopupWindow {
+        x: 0px;
+        y: root.height;
+        width: root.width;
+        height: root.options.length * 34px;
+        Rectangle {
+            background: Theme.field; border-width: 1px; border-color: Theme.border;
+            VerticalLayout {
+                for o in root.options: Rectangle {
+                    height: 34px;
+                    background: ta.has-hover ? Theme.hover : Theme.field;
+                    Text { x: 8px; text: o; font-size: 18px; color: Theme.text; }
+                    ta := TouchArea { clicked => { bx.text = o; } }
+                }
+            }
+        }
+    }
+}
+
+component FieldLabel inherits VerticalLayout {
+    in property <string> label;
+    spacing: 2px;
+    alignment: start;
+    min-width: 20px;
+    Text { text: root.label; font-size: 15px; color: Theme.text2; }
+    @children
+}
+
+// ---- ボタン（高さ28、幅=文字幅+左右16、Enter とクリックのみ反応）-------------
+component Btn inherits Rectangle {
+    in property <string> label;
+    in property <color> focus-bg: #7fd4ff;
+    in property <color> focus-fg: #000000;
+    in property <color> selected-bg: #a8cdf5;
+    in property <bool> small: false;
+    in property <float> k: 1.0;              // 大きさの倍率
+    in property <bool> selected: false;
+    in property <bool> label-only: false;   // ラベル（押せない・フォーカスされない）
+    in property <bool> hover-color: false;  // マウスが乗った時点でフォーカス色にする
+    in property <bool> tab-skip: false;
+    in property <bool> own-tab: false;
+    in property <bool> own-prev: false;
+    in property <int> focus-tick: 0;
+    callback clicked();
+    callback tab-next();
+    callback tab-prev();
+    public function focus-input() { fs.focus(); }
+    changed focus-tick => { fs.focus(); }
+    property <bool> lit: fs.has-focus || (root.hover-color && ta.has-hover);
+    height: (root.small ? 28px : 33.6px) * root.k;
+    width: t.preferred-width + 32px * root.k;
+    border-radius: 3px;
+    background: root.lit ? root.focus-bg : root.selected ? root.selected-bg : Theme.btn;
+    fs := FocusScope {
+        enabled: !root.tab-skip && !root.label-only;
+        key-pressed(e) => {
+            if (root.own-tab && ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.PageDown)) {
+                root.tab-next();
+                return EventResult.accept;
+            }
+            if (root.own-prev && (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift))) {
+                root.tab-prev();
+                return EventResult.accept;
+            }
+            if (root.own-tab && e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
+            if (root.own-tab && e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
+            if (e.text == Key.Return) { root.clicked(); return EventResult.accept; }
+            return EventResult.reject;
+        }
+    }
+    t := Text { text: root.label; font-size: (root.small ? 17px : 20.4px) * root.k; color: root.lit ? root.focus-fg : root.selected ? #222222 : Theme.btn-text; }
+    ta := TouchArea { enabled: !root.label-only; clicked => { fs.focus(); root.clicked(); } }
+}
+
+// ---- メニュー（文字は 1.5 倍 = 21px）------------------------------------------
+component MenuHead inherits Rectangle {
+    in property <string> title;
+    in property <bool> open: false;
+    callback clicked();
+    width: t.preferred-width + 28px;
+    height: 30px;
+    background: (root.open || ma.has-hover) ? Theme.menu-hover : transparent;
+    t := Text { text: root.title; font-size: 14px; color: Theme.text; }
+    ma := TouchArea { clicked => { root.clicked(); } }
+}
+
+// メニューの中身（ウィンドウ内に描く。PopupWindow は使わない）
+component MenuPanel inherits Rectangle {
+    in property <[string]> items;
+    in property <bool> call-input: false;
+    in property <bool> footer: false;
+    callback picked(int);
+    callback save();
+    callback cancel();
+    width: root.call-input ? 340px : 280px;
+    height: root.items.length * 28px + 2px + (root.call-input ? 48px : 0px) + (root.footer ? 36px : 0px);
+    background: Theme.pop-bg;
+    border-width: 1px;
+    border-color: Theme.pop-border;
+    VerticalLayout {
+        for it[i] in root.items: Rectangle {
+            height: 28px;
+            background: mta.has-hover && it != "" ? Theme.hover : transparent;
+            if it == "": Rectangle { y: 13px; height: 1px; background: Theme.sep; }
+            if it != "": Text { x: 10px; text: it; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+            mta := TouchArea { clicked => { root.picked(i); } }
+        }
+        if root.call-input: Rectangle {
+            height: 48px;
+            Rectangle { y: 0px; height: 1px; background: Theme.sep; }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+                Text { text: "コールサイン"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                VerticalLayout {
+                    alignment: center;
+                    Field {
+                        kind: 0; mono: true; text <=> Backend.d-call;
+                    }
+                }
+            }
+        }
+        if root.footer: Rectangle {
+            height: 36px;
+            Rectangle { y: 0px; height: 1px; background: Theme.sep; }
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 8px;
+                alignment: end;
+                Btn { label: "保存"; k: 0.6667; tab-skip: true; clicked => { root.save(); } }
+                Btn { label: "キャンセル"; k: 0.6667; tab-skip: true; clicked => { root.cancel(); } }
+            }
+        }
+    }
+}
+
+// ---- 一覧・履歴の行 ------------------------------------------------------------
+component Cell inherits Text {
+    overflow: elide;
+    vertical-alignment: center;
+    font-size: 18px;
+    color: Theme.text;
+    horizontal-stretch: 0;
+    min-width: 0px;
+}
+
+component RowLine inherits Rectangle {
+    in property <LogRow> r;
+    in property <bool> header: false;
+    in property <bool> tooltip: false;
+    in property <bool> shade: false;
+    in property <bool> selected: false;
+    callback dbl();
+    callback clicked();
+    height: 34px;
+    background: root.selected ? Theme.row-sel : rta.has-hover ? Theme.row-hover : root.shade ? Theme.row-shade : Theme.row;
+    HorizontalLayout {
+        padding-left: 6px;
+        spacing: 6px;
+        if Backend.col-show[0]: Cell { preferred-width: Cols.date; text: root.r.date; }
+        if Backend.col-show[1]: Cell { preferred-width: Cols.t-start; text: root.r.t-start; }
+        if Backend.col-show[2]: Cell { preferred-width: Cols.t-end; text: root.r.t-end; }
+        if Backend.col-show[3]: Cell { preferred-width: Cols.call; text: root.r.call; font-family: "Consolas"; }
+        if Backend.col-show[4]: Cell { preferred-width: Cols.rst-s; text: root.r.rst-s; }
+        if Backend.col-show[5]: Cell { preferred-width: Cols.rst-r; text: root.r.rst-r; }
+        if Backend.col-show[6]: Cell { preferred-width: Cols.freq; text: root.r.freq; }
+        if Backend.col-show[7]: Cell { preferred-width: Cols.mode; text: root.r.mode; }
+        if Backend.col-show[8]: Cell { preferred-width: Cols.power; text: root.r.power; }
+        if Backend.col-show[9]: Cell { preferred-width: Cols.name; text: root.r.name; }
+        if Backend.col-show[10]: Cell { preferred-width: Cols.qth; text: root.r.qth; }
+        if Backend.col-show[11]: Cell { preferred-width: Cols.loc; text: root.r.loc; }
+        if Backend.col-show[12]: Cell { preferred-width: Cols.num; text: root.r.num; }
+        if Backend.col-show[13]: Cell { preferred-width: Cols.spec; text: root.r.spec; }
+        if Backend.col-show[14]: Cell { text: root.r.memo; horizontal-stretch: 1; }
+        if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
+    }
+    rta := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { if (!root.header) { root.dbl(); } }
+    }
+    out property <length> mx: rta.mouse-x;
+    callback hovered(bool);
+    property <bool> hv: rta.has-hover && root.tooltip;
+    changed hv => { root.hovered(root.hv); }
+}
+
+component HCell inherits Rectangle {
+    in property <string> label;
+    in-out property <length> w;
+    preferred-width: root.w;
+    min-width: 0px;
+    horizontal-stretch: 0;
+    Text { x: 0px; width: parent.width - 8px; text: root.label; font-size: 18px; color: Theme.text; vertical-alignment: center; overflow: elide; }
+    Rectangle { x: parent.width - 1px; width: 1px; background: Theme.head-line; }
+    TouchArea {
+        x: parent.width - 8px;
+        width: 8px;
+        mouse-cursor: col-resize;
+        moved => { root.w = max(30px, root.w + (self.mouse-x - self.pressed-x)); }
+        pointer-event(e) => { if (e.kind == PointerEventKind.up) { Backend.cols-changed(); } }
+    }
+}
+
+component HeaderLine inherits Rectangle {
+    height: 34px;
+    background: Theme.head;
+    HorizontalLayout {
+        padding-left: 6px;
+        spacing: 6px;
+        if Backend.col-show[0]: HCell { label: "日付"; w <=> Cols.date; }
+        if Backend.col-show[1]: HCell { label: "開始"; w <=> Cols.t-start; }
+        if Backend.col-show[2]: HCell { label: "終了"; w <=> Cols.t-end; }
+        if Backend.col-show[3]: HCell { label: "コールサイン"; w <=> Cols.call; }
+        if Backend.col-show[4]: HCell { label: "RST(S)"; w <=> Cols.rst-s; }
+        if Backend.col-show[5]: HCell { label: "RST(R)"; w <=> Cols.rst-r; }
+        if Backend.col-show[6]: HCell { label: "周波数"; w <=> Cols.freq; }
+        if Backend.col-show[7]: HCell { label: "モード"; w <=> Cols.mode; }
+        if Backend.col-show[8]: HCell { label: "出力"; w <=> Cols.power; }
+        if Backend.col-show[9]: HCell { label: "名前"; w <=> Cols.name; }
+        if Backend.col-show[10]: HCell { label: "QTH"; w <=> Cols.qth; }
+        if Backend.col-show[11]: HCell { label: "常置場所"; w <=> Cols.loc; }
+        if Backend.col-show[12]: HCell { label: "市郡区ナンバー"; w <=> Cols.num; }
+        if Backend.col-show[13]: HCell { label: "一括表示"; w <=> Cols.spec; }
+        if Backend.col-show[14]: Cell { text: "メモ"; horizontal-stretch: 1; }
+        if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+// 行のポップアップ（一覧・履歴共通。親の中に描く。位置は行に入った時点で固定）
+component RowTip inherits Rectangle {
+    in property <bool> on;
+    in property <LogRow> data;
+    in property <length> box-w;
+    in property <length> box-h;
+    in property <length> px;
+    in property <length> py;
+    visible: root.on && Backend.show-popup;
+    width: min(root.box-w / 2, tt.preferred-width + 24px);
+    height: tt.preferred-height + 16px;
+    x: min(root.px, root.box-w - self.width);
+    y: root.py + self.height > root.box-h ? root.py - 34px - self.height - 4px : root.py;
+    background: Theme.tip-bg; border-width: 1px; border-color: Theme.tip-border;
+    tt := Text {
+        x: 12px; y: 8px; width: parent.width - 24px; wrap: word-wrap; font-size: 17px; color: Theme.tip-text;
+        text: root.data.date + " " + root.data.t-start + " " + root.data.call + "\n"
+            + root.data.rst-s + " " + root.data.rst-r + " " + root.data.freq + " " + root.data.mode
+            + "\n" + root.data.memo-full;
+    }
+}
+
+// 縦スクロールバー（トラックのクリック・ドラッグで位置を動かす）
+component VScroll inherits Rectangle {
+    in property <length> view-h;
+    in property <length> page-h;
+    in-out property <length> pos;
+    width: 14px;
+    background: Theme.head;
+    property <length> scroll-max: root.view-h - root.page-h;
+    property <length> thumb-h: root.scroll-max > 0px ? max(30px, root.height * root.page-h / root.view-h) : root.height;
+    property <length> range: root.height - root.thumb-h;
+    function apply(y: length) {
+        if (root.scroll-max <= 0px || root.range <= 0px) { return; }
+        let f = (y - root.thumb-h / 2) / root.range;
+        root.pos = -(f < 0 ? 0 : (f > 1 ? 1 : f)) * root.scroll-max;
+    }
+    Rectangle {
+        x: 2px;
+        width: parent.width - 4px;
+        height: root.thumb-h;
+        y: root.scroll-max > 0px ? (-root.pos / root.scroll-max) * root.range : 0px;
+        border-radius: 4px;
+        background: (sta.has-hover || sta.pressed) ? Theme.focus : Theme.border;
+    }
+    sta := TouchArea {
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { root.apply(self.mouse-y); } }
+        moved => { root.apply(self.mouse-y); }
+    }
+}
+
+component Hist inherits Rectangle {
+    min-height: 150px;
+    property <int> tip-id: -1;
+    property <bool> tip-on: false;
+    property <LogRow> tip-row;
+    property <length> tip-x: 0px;
+    property <length> tip-y: 0px;
+    VerticalLayout {
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text { text: "履歴"; font-size: 24px; color: Theme.text; vertical-alignment: center; }
+            Text { text: "\{Backend.history.length}件"; font-size: 24px; color: Theme.text; vertical-alignment: center; }
+            Btn { small: true; tab-skip: true; label: "日時昇順"; selected: Backend.sort-asc; clicked => { Backend.sort(true); } }
+            Btn { small: true; tab-skip: true; label: "日時降順"; selected: !Backend.sort-asc; clicked => { Backend.sort(false); } }
+        }
+        HeaderLine { }
+        HorizontalLayout {
+          vertical-stretch: 1;
+          spacing: 4px;
+          hlv := ListView {
+            horizontal-stretch: 1;
+            for x[i] in Backend.history: RowLine {
+                r: x;
+                shade: Math.mod(i, 2) == 1;
+                tooltip: true;
+                hovered(on) => {
+                    if (on) {
+                        root.tip-row = x;
+                        root.tip-id = x.id;
+                        root.tip-x = self.absolute-position.x - root.absolute-position.x + self.mx + 16px;
+                        root.tip-y = self.absolute-position.y - root.absolute-position.y + self.height + 2px;
+                        root.tip-on = true;
+                    } else if (root.tip-id == x.id) {
+                        root.tip-on = false;
+                    }
+                }
+            }
+          }
+          VScroll { view-h: hlv.content-height; page-h: hlv.height; pos <=> hlv.content-y; }
+        }
+    }
+    RowTip { on: root.tip-on; data: root.tip-row; px: root.tip-x; py: root.tip-y; box-w: root.width; box-h: root.height; }
+}
+
+// ---- 入力 / 編集画面 -------------------------------------------------------------
+component InputScreen inherits Rectangle {
+    property <int> tick: Backend.focus-tick;
+    changed tick => { date-f.focus-input(); }
+    init => { date-f.focus-input(); }
+    Timer {
+        interval: 60ms;
+        running: true;
+        triggered => { self.running = false; date-f.focus-input(); }
+    }
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        // 1段目（左側の項目：ホバーでポップアップ）
+        hover := TouchArea {
+            height: 60px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                FieldLabel {
+                    label: "日付"; preferred-width: Metrics.cw * 10 + 22px;
+                    date-f := Field {
+                        kind: 2; own-tab: true; tab-next => { start-f.focus-input(); } tab-prev => { Backend.end-tick += 1; } text <=> Form.date;
+                        focus-gained => { if (Form.date == "") { Form.date = Backend.now(0); } self.cursor-end(); }
+                    }
+                }
+                FieldLabel {
+                    label: "開始時刻"; preferred-width: Metrics.cw * 5 + 24px;
+                    start-f := Field {
+                        kind: 3; own-tab: true; tab-next => { call-f.focus-input(); } tab-prev => { date-f.focus-input(); } text <=> Form.t-start;
+                        focus-gained => { if (Form.t-start == "") { Form.t-start = Backend.now(1); } self.cursor-end(); }
+                    }
+                }
+                FieldLabel {
+                    label: "コールサイン"; preferred-width: Metrics.cw * 14 + 22px;
+                    call-f := Field {
+                        kind: 0; mono: true; own-tab: true; tab-next => { rsts-f.focus-input(); } tab-prev => { start-f.focus-input(); } text <=> Form.call;
+                        accepted => { Backend.lookup(self.text); }
+                    }
+                }
+                FieldLabel { label: "RST(S)"; preferred-width: Metrics.cw * 4 + 14px; rsts-f := Field { kind: 1; own-tab: true; tab-next => { rstr-f.focus-input(); } tab-prev => { call-f.focus-input(); } text <=> Form.rst-s; } }
+                FieldLabel { label: "RST(R)"; preferred-width: Metrics.cw * 4 + 14px; rstr-f := Field { kind: 1; own-tab: true; tab-next => { freq-c.focus-input(); } tab-prev => { rsts-f.focus-input(); } text <=> Form.rst-r; } }
+                FieldLabel {
+                    label: "周波数"; preferred-width: Metrics.cw * 9 + 30px;
+                    freq-c := Choice {
+                        own-tab: true; tab-next => { mode-c.focus-input(); } tab-prev => { rstr-f.focus-input(); }
+                        options: Backend.freq-opts; opt-kind: 0; editable: true; text <=> Form.freq;
+                        focus-gained => { if (Form.freq == "") { Form.freq = Backend.last(0); } }
+                    }
+                }
+                FieldLabel {
+                    label: "モード"; preferred-width: Metrics.cw * 8 + 30px;
+                    mode-c := Choice {
+                        own-tab: true; tab-next => { power-c.focus-input(); } tab-prev => { freq-c.focus-input(); }
+                        options: Backend.mode-opts; opt-kind: 1; editable: true; text <=> Form.mode;
+                        focus-gained => { if (Form.mode == "") { Form.mode = Backend.last(1); } }
+                    }
+                }
+                FieldLabel {
+                    label: "出力"; preferred-width: Metrics.cw * 8 + 30px;
+                    power-c := Choice {
+                        own-tab: true; tab-next => { name-f.focus-input(); } tab-prev => { mode-c.focus-input(); }
+                        options: Backend.power-opts; opt-kind: 2; editable: true; text <=> Form.power;
+                        focus-gained => { if (Form.power == "") { Form.power = Backend.last(2); } }
+                    }
+                }
+                FieldLabel { label: "名前"; preferred-width: Metrics.cw * 16 + 22px; name-f := Field { own-tab: true; tab-next => { qth-f.focus-input(); } tab-prev => { power-c.focus-input(); } text <=> Form.name; } }
+                FieldLabel { label: "QTH"; preferred-width: Metrics.cw * 20 + 22px; qth-f := Field { own-tab: true; tab-next => { memo-fs.focus(); } tab-prev => { name-f.focus-input(); } text <=> Form.qth; } }
+            }
+        }
+
+        // 2段目：メモ（半角72文字・5行）と 常置場所 / 市郡区ナンバー / 一括表示
+        HorizontalLayout {
+            height: 188px;
+            spacing: 8px;
+            alignment: start;
+            FieldLabel {
+                label: "メモ"; preferred-width: Metrics.cw * 72 + 24px;
+                Rectangle {
+                    height: 162px;
+                    background: Theme.field;
+                    border-width: memo-te.has-focus ? 3px : 1px;
+                    border-color: memo-te.has-focus ? Theme.focus : Theme.border;
+                    memo-fs := FocusScope {
+                        forward-focus: memo-te;
+                        capture-key-pressed(e) => {
+                            if (e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
+                            if (e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
+                            if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)) {
+                                qth-f.focus-input();
+                                return EventResult.accept;
+                            }
+                            if (e.text == Key.PageDown || e.text == Key.Tab) {
+                                end-f.focus-input();
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                        memo-te := TextEdit {
+                            x: 3px; y: 3px; width: parent.width - 6px; height: parent.height - 6px;
+                            wrap: word-wrap;
+                            text <=> Form.memo;
+                        }
+                    }
+                }
+            }
+            FieldLabel {
+                label: "常置場所"; preferred-width: Metrics.cw * 20 + 22px;
+                Field { display: true; active: Backend.use-api; text: Form.loc; }
+            }
+            FieldLabel {
+                label: "市郡区ナンバー"; preferred-width: Metrics.cw * 15 + 22px;
+                Field { display: true; active: Backend.use-api; text: Form.num; }
+            }
+            FieldLabel {
+                label: "一括表示"; preferred-width: Metrics.cw * 15 + 22px;
+                Field { display: true; active: Backend.use-api; text: Form.spec; }
+            }
+        }
+
+        // 3段目：終了時刻（左）／ 保存・編集ボタン（右）
+        HorizontalLayout {
+            height: 62px;
+            spacing: 8px;
+            FieldLabel {
+                label: "終了時刻"; preferred-width: Metrics.cw * 5 + 24px;
+                end-f := Field {
+                    kind: 3; own-tab: true; tab-next => { Backend.end-tick += 1; } tab-prev => { memo-fs.focus(); } text <=> Form.t-end;
+                    focus-gained => { if (Form.t-end == "") { Form.t-end = Backend.now(1); } self.cursor-end(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                alignment: end;
+                HorizontalLayout {
+                    spacing: 8px;
+                    if !Backend.editing: HorizontalLayout {
+                        spacing: 8px;
+                        save-b := Btn {
+                            label: "保存して次入力"; hover-color: true; focus-tick: Backend.end-tick;
+                            own-tab: true; own-prev: true;
+                            tab-next => { clr-b.focus-input(); }
+                            tab-prev => { end-f.focus-input(); }
+                            clicked => { Backend.save(); }
+                        }
+                        clr-b := Btn {
+                            label: "クリア"; focus-bg: #ffe14d; hover-color: true;
+                            own-tab: true; own-prev: true;
+                            tab-next => { date-f.focus-input(); }
+                            tab-prev => { save-b.focus-input(); }
+                            clicked => { Backend.clear-form(); }
+                        }
+                    }
+                    if Backend.editing: HorizontalLayout {
+                        spacing: 8px;
+                        eb0 := Btn {
+                            label: "保存して終了"; hover-color: true; focus-tick: Backend.end-tick;
+                            own-tab: true; own-prev: true;
+                            tab-next => { eb1.focus-input(); }
+                            tab-prev => { end-f.focus-input(); }
+                            clicked => { Backend.edit-end(0); }
+                        }
+                        eb1 := Btn {
+                            label: "元に戻す"; focus-bg: #ffe14d; hover-color: true;
+                            own-tab: true; own-prev: true;
+                            tab-next => { eb2.focus-input(); }
+                            tab-prev => { eb0.focus-input(); }
+                            clicked => { Backend.edit-end(2); }
+                        }
+                        eb2 := Btn {
+                            label: "保存せず終了"; focus-bg: #ffe14d; hover-color: true;
+                            own-tab: true; own-prev: true;
+                            tab-next => { eb3.focus-input(); }
+                            tab-prev => { eb1.focus-input(); }
+                            clicked => { Backend.edit-end(1); }
+                        }
+                        eb3 := Btn {
+                            label: "削除"; focus-bg: #d32f2f; focus-fg: #ffffff; hover-color: true;
+                            own-tab: true; own-prev: true;
+                            tab-next => { date-f.focus-input(); }
+                            tab-prev => { eb2.focus-input(); }
+                            clicked => { Backend.edit-end(3); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 履歴（編集中は同じ大きさのダミー）
+        Rectangle { height: 24px; }
+        if !Backend.editing: Hist { vertical-stretch: 1; }
+        if Backend.editing: Rectangle { vertical-stretch: 1; }
+    }
+}
+
+// ---- 一覧画面 ---------------------------------------------------------------------
+component ListScreen inherits Rectangle {
+    property <int> tip-id: -1;
+    property <bool> tip-on: false;
+    property <LogRow> tip-row;
+    property <length> tip-x: 0px;
+    property <length> tip-y: 0px;
+    property <int> sel: -1;                     // キーボードで選んだ行
+    property <bool> asc: Backend.sort-asc;
+    property <string> q: Backend.query;
+    property <int> ftick: Backend.focus-tick;
+    changed ftick => { list-fs.focus(); }
+    changed asc => { root.sel = -1; }
+    changed q => { root.sel = -1; }
+
+    function select(i: int) {
+        let n = Backend.rows.length;
+        if (n == 0) { return; }
+        root.sel = i < 0 ? 0 : (i > n - 1 ? n - 1 : i);
+        if (root.sel * 34px < -lv.content-y) { lv.content-y = -root.sel * 34px; }
+        if ((root.sel + 1) * 34px > -lv.content-y + lv.height) { lv.content-y = -((root.sel + 1) * 34px - lv.height); }
+    }
+    init => { sb.text = Backend.query; list-fs.focus(); }
+    Timer {
+        interval: 60ms;
+        running: true;
+        triggered => { self.running = false; list-fs.focus(); }
+    }
+
+    // キー操作（大きさ0。検索欄からTabで移ってくる）
+    list-fs := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(e) => {
+            if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
+            if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+            if ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.DownArrow) { root.select(root.sel + 1); return EventResult.accept; }
+            if (e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift) || e.text == Key.UpArrow) { root.select(root.sel - 1); return EventResult.accept; }
+            if (e.text == Key.PageDown) { root.select(root.sel + 12); return EventResult.accept; }
+            if (e.text == Key.PageUp) { root.select(root.sel - 12); return EventResult.accept; }
+            if (e.text == Key.Home) { root.select(0); return EventResult.accept; }
+            if (e.text == Key.End) { root.select(Backend.rows.length - 1); return EventResult.accept; }
+            if (e.text == Key.Return && root.sel >= 0 && root.sel < Backend.rows.length) {
+                Backend.edit-row(Backend.rows[root.sel].id);
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+    }
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            VerticalLayout {
+                alignment: end;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "リスト"; font-size: 24px; color: Theme.text; vertical-alignment: center; }
+                    Text { text: "\{Backend.total-count}件"; font-size: 24px; color: Theme.text; vertical-alignment: center; }
+                    Btn { small: true; tab-skip: true; label: "日時昇順"; selected: Backend.sort-asc; clicked => { Backend.sort(true); } }
+                    Btn { small: true; tab-skip: true; label: "日時降順"; selected: !Backend.sort-asc; clicked => { Backend.sort(false); } }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            FieldLabel {
+                label: "検索"; preferred-width: Metrics.cw * 50 + 22px + 90px + 130px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    sb := Field { preferred-width: Metrics.cw * 50 + 22px; accepted => { Backend.search(self.text); } }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: Backend.query == "" ? "" : "検索結果 \{Backend.rows.length}件";
+                            font-size: 16px; color: Theme.text;
+                        }
+                    }
+                    VerticalLayout { alignment: center; Btn { small: true; tab-skip: true; label: "クリア"; clicked => { sb.text = ""; Backend.search(""); } } }
+                }
+            }
+        }
+        HeaderLine { }
+        HorizontalLayout {
+          vertical-stretch: 1;
+          spacing: 4px;
+          lv := ListView {
+            horizontal-stretch: 1;
+            for x[i] in Backend.rows: RowLine {
+                r: x;
+                shade: Math.mod(i, 2) == 1;
+                selected: root.sel == i;
+                tooltip: true;
+                clicked => { root.select(i); list-fs.focus(); }
+                dbl => { Backend.edit-row(x.id); }
+                hovered(on) => {
+                    if (on) {
+                        root.tip-row = x;
+                        root.tip-id = x.id;
+                        root.tip-x = self.absolute-position.x - root.absolute-position.x + self.mx + 16px;
+                        root.tip-y = self.absolute-position.y - root.absolute-position.y + self.height + 2px;
+                        root.tip-on = true;
+                    } else if (root.tip-id == x.id) {
+                        root.tip-on = false;
+                    }
+                }
+            }
+          }
+          VScroll { view-h: lv.content-height; page-h: lv.height; pos <=> lv.content-y; }
+        }
+    }
+
+    if Backend.message != "": Text {
+        x: 0px; y: 140px; width: root.width;
+        text: Backend.message; font-size: 21px; color: Theme.text3; horizontal-alignment: center;
+    }
+
+    RowTip { on: root.tip-on; data: root.tip-row; px: root.tip-x; py: root.tip-y; box-w: root.width; box-h: root.height; }
+}
+
+// ---- 印刷プレビュー ------------------------------------------------------------------
+component PreviewScreen inherits Rectangle {
+    background: Theme.bg;
+    init => { pfs.focus(); }
+    Timer {
+        interval: 60ms;
+        running: true;
+        triggered => { self.running = false; pfs.focus(); }
+    }
+    TouchArea { }   // 下の画面へのクリックを通さない
+    pfs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) { Backend.preview-open = false; return EventResult.accept; }
+            if (e.text == Key.PageDown || e.text == Key.RightArrow || e.text == Key.DownArrow) { Backend.preview-goto(Backend.preview-page + 1); return EventResult.accept; }
+            if (e.text == Key.PageUp || e.text == Key.LeftArrow || e.text == Key.UpArrow) { Backend.preview-goto(Backend.preview-page - 1); return EventResult.accept; }
+            if (e.text == Key.Home) { Backend.preview-goto(0); return EventResult.accept; }
+            if (e.text == Key.End) { Backend.preview-goto(Backend.preview-pages - 1); return EventResult.accept; }
+            return EventResult.reject;
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "PDF出力"; font-size: 20px; color: Theme.text; vertical-alignment: center; }
+                Btn { label: "前のページ"; tab-skip: true; clicked => { Backend.preview-goto(Backend.preview-page - 1); } }
+                Btn { label: "次のページ"; tab-skip: true; clicked => { Backend.preview-goto(Backend.preview-page + 1); } }
+                Text { text: "\{Backend.preview-page + 1} / \{Backend.preview-pages}"; font-size: 20px; color: Theme.text; vertical-alignment: center; }
+                Btn { label: "PDF保存"; tab-skip: true; clicked => { Backend.save-pdf(); } }
+                Btn { label: "閉じる"; tab-skip: true; clicked => { Backend.preview-open = false; } }
+                Text { text: Backend.status; font-size: 16px; color: Theme.err; vertical-alignment: center; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "余白 (mm)"; font-size: 18px; color: Theme.text; vertical-alignment: center; }
+                Text { text: "上"; font-size: 18px; color: Theme.text; vertical-alignment: center; }
+                SpinBox { width: 100px; minimum: 0; maximum: 60; value <=> Backend.m-top; edited(v) => { Backend.margins-changed(); } }
+                Text { text: "下"; font-size: 18px; color: Theme.text; vertical-alignment: center; }
+                SpinBox { width: 100px; minimum: 0; maximum: 60; value <=> Backend.m-bottom; edited(v) => { Backend.margins-changed(); } }
+                Text { text: "左"; font-size: 18px; color: Theme.text; vertical-alignment: center; }
+                SpinBox { width: 100px; minimum: 0; maximum: 60; value <=> Backend.m-left; edited(v) => { Backend.margins-changed(); } }
+                Text { text: "右"; font-size: 18px; color: Theme.text; vertical-alignment: center; }
+                SpinBox { width: 100px; minimum: 0; maximum: 60; value <=> Backend.m-right; edited(v) => { Backend.margins-changed(); } }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                background: #7a7a7a;
+                Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: Backend.preview-image; image-fit: contain; }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "GOAT LOGBOOK";
+    icon: @image-url("../assets/Icon.png");
+    default-font-size: 21px;
+    default-font-family: "Yu Gothic UI";
+    preferred-width: 1000px;
+    preferred-height: 650px;
+    min-width: 900px;
+    min-height: 600px;
+    background: Theme.bg;
+    // 起動直後にフォーカスを確実に置く（F11/F12 などのキーを受けるため）
+    Timer {
+        interval: 300ms;
+        running: true;
+        triggered => { self.running = false; Backend.focus-tick += 1; }
+    }
+    property <int> open-menu: -1;
+    property <bool> dark: Theme.dark;
+    changed dark => { Palette.color-scheme = root.dark ? ColorScheme.dark : ColorScheme.light; }
+    init => {
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+        Backend.clock-text = Backend.now(Backend.show-seconds ? 2 : 1);
+    }
+    Timer {
+        interval: 1s;
+        running: Backend.show-clock;
+        triggered => { Backend.clock-text = Backend.now(Backend.show-seconds ? 2 : 1); }
+    }
+
+    win-fs := FocusScope {
+      capture-key-pressed(e) => {
+        if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
+        if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+        return EventResult.reject;
+      }
+      key-pressed(e) => {
+        if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
+        if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+        return EventResult.reject;
+      }
+    VerticalLayout {
+        Rectangle {
+            height: 30px; background: Theme.bar;
+            HorizontalLayout {
+                alignment: start;
+                mh0 := MenuHead {
+                    title: "ファイル"; open: root.open-menu == 0;
+                    clicked => { root.open-menu = root.open-menu == 0 ? -1 : 0; }
+                }
+                MenuHead { title: "編集"; }
+                mh2 := MenuHead {
+                    title: "設定"; open: root.open-menu == 2 || root.open-menu == 3;
+                    clicked => {
+                        if (root.open-menu == 2 || root.open-menu == 3) { root.open-menu = -1; }
+                        else { Backend.settings-open(); root.open-menu = 2; }
+                    }
+                }
+                MenuHead { title: "ヘルプ"; }
+            }
+            Text {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                text: Backend.my-call == "" ? "GOAT LogBook" : "Radio Station  " + Backend.my-call + "　GOAT LogBook";
+                font-family: "Consolas"; font-size: 20px;
+                color: Theme.text; horizontal-alignment: center; vertical-alignment: center;
+            }
+            Text {
+                visible: Backend.show-clock;
+                x: parent.width - 250px; y: 0px; width: 138px; height: parent.height;
+                text: Backend.clock-text;
+                font-family: "Consolas"; font-size: 25.2px;
+                color: Theme.text; horizontal-alignment: right; vertical-alignment: center;
+            }
+        }
+        HorizontalLayout {
+            padding: 6px; padding-left: 12px; padding-right: 12px; spacing: 12px;
+            Text { text: Backend.file-name; font-size: 16px; color: Theme.text3; vertical-alignment: center; }
+            Text { text: Backend.status; font-size: 16px; color: Theme.err; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Btn { label: "入力"; tab-skip: true; selected: Backend.screen == 0 && !Backend.editing; selected-bg: #6fcf7f; clicked => { Backend.goto(0); } }
+            Btn { label: "リスト"; tab-skip: true; selected: Backend.screen == 1; selected-bg: #6fcf7f; clicked => { Backend.goto(1); } }
+            Btn { label: "編集"; tab-skip: true; label-only: true; selected: Backend.screen == 0 && Backend.editing; selected-bg: #6fcf7f; }
+        }
+        if Backend.screen == 0: InputScreen { vertical-stretch: 1; }
+        if Backend.screen == 1: ListScreen { vertical-stretch: 1; }
+    }
+    }
+
+    // メニューが開いているとき、外側のクリックで閉じる
+    if root.open-menu >= 0: TouchArea {
+        x: 0px; y: 30px; width: parent.width; height: parent.height - 30px;
+        clicked => { root.open-menu = -1; }
+    }
+    if root.open-menu == 0: MenuPanel {
+        x: mh0.absolute-position.x; y: 30px;
+        items: ["ファイルを開く…", "ファイルを新規作成…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
+        picked(i) => { root.open-menu = -1; Backend.menu(0, i); }
+    }
+    if root.open-menu == 2: MenuPanel {
+        x: mh2.absolute-position.x; y: 30px;
+        call-input: true;
+        footer: true;
+        items: [(Backend.d-use-api ? "● " : "○ ") + "総務省無線局検索APIを使用する",
+                (Backend.d-use-api ? "○ " : "● ") + "使用しない",
+                "",
+                "市郡区ナンバーのファイルの選択…",
+                "一覧・履歴の表示項目…",
+                "",
+                (Backend.d-dark ? "☑ " : "□ ") + "ダークモード",
+                (Backend.d-clock ? "☑ " : "□ ") + "時計表示",
+                (Backend.d-sec ? "☑ " : "□ ") + "時計の秒表示",
+                (Backend.d-popup ? "☑ " : "□ ") + "ポップアップ表示"];
+        picked(i) => {
+            if (i == 4) { root.open-menu = 3; }
+            else { Backend.menu(2, i); }
+        }
+        save => { root.open-menu = -1; Backend.settings-save(); }
+        cancel => { root.open-menu = -1; }
+    }
+    if root.open-menu == 3: MenuPanel {
+        x: mh2.absolute-position.x; y: 30px;
+        footer: true;
+        items: [(Backend.d-col-show[0] ? "☑ " : "□ ") + "日付",
+                (Backend.d-col-show[1] ? "☑ " : "□ ") + "開始時刻",
+                (Backend.d-col-show[2] ? "☑ " : "□ ") + "終了時刻",
+                (Backend.d-col-show[3] ? "☑ " : "□ ") + "コールサイン",
+                (Backend.d-col-show[4] ? "☑ " : "□ ") + "RST(S)",
+                (Backend.d-col-show[5] ? "☑ " : "□ ") + "RST(R)",
+                (Backend.d-col-show[6] ? "☑ " : "□ ") + "周波数",
+                (Backend.d-col-show[7] ? "☑ " : "□ ") + "モード",
+                (Backend.d-col-show[8] ? "☑ " : "□ ") + "出力",
+                (Backend.d-col-show[9] ? "☑ " : "□ ") + "名前",
+                (Backend.d-col-show[10] ? "☑ " : "□ ") + "QTH",
+                (Backend.d-col-show[11] ? "☑ " : "□ ") + "常置場所",
+                (Backend.d-col-show[12] ? "☑ " : "□ ") + "市郡区ナンバー",
+                (Backend.d-col-show[13] ? "☑ " : "□ ") + "一括表示",
+                (Backend.d-col-show[14] ? "☑ " : "□ ") + "メモ"];
+        picked(i) => { Backend.menu(3, i); }
+        save => { root.open-menu = -1; Backend.settings-save(); }
+        cancel => { root.open-menu = -1; }
+    }
+
+    // 印刷プレビュー（全体を覆う）
+    if Backend.preview-open: PreviewScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+}
