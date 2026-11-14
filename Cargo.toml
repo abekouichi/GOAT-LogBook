@@ -13,6 +13,7 @@ ureq = "2"
 rfd = "0.15"
 printpdf = { version = "0.7", default-features = false }
 fontdue = "0.9"
+ttf-parser = "0.25"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi"] }

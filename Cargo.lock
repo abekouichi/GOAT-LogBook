@@ -2685,6 +2685,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "ttf-parser 0.25.1",
  "ureq",
  "windows-sys 0.59.0",
  "winresource",

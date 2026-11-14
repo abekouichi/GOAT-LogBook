@@ -84,11 +84,12 @@ struct Config {
     #[serde(default)] col_show: Vec<bool>,
     #[serde(default)] num_file: Option<String>,
     #[serde(default = "default_api")] api_url: String,
+    #[serde(default)] last: Vec<String>, // 前回の入力：周波数・モード・出力・RST(S)・RST(R)
 }
 fn yes() -> bool { true }
 fn default_api() -> String { DEFAULT_API.to_string() }
 impl Default for Config {
-    fn default() -> Self { Config { last_file: None, use_api: true, sort_asc: true, cols: vec![], cols_ver: 0, dark: false, show_clock: true, show_seconds: true, show_popup: true, margins: vec![], font_regular: None, font_bold: None, font_mono: None, my_call: String::new(), col_show: vec![], num_file: None, api_url: default_api() } }
+    fn default() -> Self { Config { last_file: None, use_api: true, sort_asc: true, cols: vec![], cols_ver: 0, dark: false, show_clock: true, show_seconds: true, show_popup: true, margins: vec![], font_regular: None, font_bold: None, font_mono: None, my_call: String::new(), col_show: vec![], num_file: None, api_url: default_api(), last: vec![] } }
 }
 
 fn exe_dir() -> PathBuf {
@@ -111,7 +112,7 @@ struct App {
     file: Option<PathBuf>,
     recs: Vec<Record>,
     num: Arc<HashMap<String, String>>,
-    last: [String; 3],
+    last: [String; 5], // 0=周波数 1=モード 2=出力 3=RST(S) 4=RST(R)
     editing: Option<usize>,
     orig: Option<Record>,
     hist_call: String,
@@ -445,6 +446,22 @@ fn options(kind: i32) -> Vec<String> {
     }
 }
 
+/// RSTの開始値：前回が3桁なら599、それ以外（2桁・前回なし）は59
+fn rst_start(last: &str) -> String {
+    if last.len() == 3 { "599".to_string() } else { "59".to_string() }
+}
+
+/// RSTの↑↓：2桁なら1の桁、3桁なら10の桁（S）を 1〜9 の範囲で増減する
+fn rst_step(text: &str, dir: i32) -> String {
+    let n = text.len();
+    if n != 2 && n != 3 { return rst_start(text); }
+    let mut b = text.as_bytes().to_vec();
+    let i = n - 1 - if n == 3 { 1 } else { 0 };
+    if !b[i].is_ascii_digit() { return text.to_string(); }
+    b[i] = (((b[i] - b'0') as i32 + dir).clamp(1, 9) as u8) + b'0';
+    String::from_utf8(b).unwrap_or_else(|_| text.to_string())
+}
+
 fn cycle(kind: i32, cur: &str, dir: i32) -> String {
     let o = options(kind);
     let n = o.len() as i32;
@@ -594,7 +611,7 @@ fn build_job(s: &App) -> Result<PrintJob, String> {
     let mut info = format!("出力日時: {}　／　{}件", Local::now().format("%Y/%m/%d %H:%M"), rows.len());
     if !s.cfg.my_call.is_empty() { info = format!("{}　／　{}", s.cfg.my_call, info); }
     if !s.query.is_empty() { info.push_str(&format!("　／　検索: {}", s.query)); }
-    let mono: Vec<bool> = cols.iter().map(|&c| c == 3).collect(); // コールサインは等幅（画面と同じ Consolas）
+    let mono: Vec<bool> = cols.iter().map(|&c| matches!(c, 0..=8 | 12 | 13)).collect(); // 日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示は等幅（Windows: Consolas / Linux: Inconsolata）
     Ok(PrintJob { title, info, heads: hv, rows, mono, margins: margins_of(&s.cfg) })
 }
 
@@ -608,6 +625,7 @@ const PAGE_H: f32 = 210.0;
 enum FontKind { Regular, Bold, Mono }
 
 /// 描画命令。座標は mm、原点は用紙の左上。Text の y はベースライン
+#[derive(Clone)]
 enum Cmd {
     Rect { x: f32, y: f32, w: f32, h: f32, fill: Option<f32>, stroke: bool },
     Text { x: f32, y: f32, size: f32, font: FontKind, text: String },
@@ -629,23 +647,137 @@ impl Fonts {
 /// PDF出力画面で使うデータ（元データ・フォント・描画命令）
 struct Doc { job: PrintJob, fonts: Arc<Fonts>, pages: Vec<Vec<Cmd>> }
 
-/// フォントを読み込む。実行ファイルと同じ場所の fonts フォルダ、または setting.json で指定した場所から探す
-fn load_fonts(cfg: &Config) -> Result<Fonts, String> {
-    let dir = exe_dir().join("fonts");
-    let find = |custom: &Option<String>, names: &[&str]| -> Option<PathBuf> {
-        if let Some(p) = custom {
-            let p = PathBuf::from(p);
-            if p.exists() { return Some(p); }
+/// TTC（複数の書体が入ったファイル）から、1つの書体を取り出して、単独のTTFにする。TTFならそのまま返す
+fn extract_face(data: &[u8], index: u32) -> Option<Vec<u8>> {
+    if data.get(0..4)? != b"ttcf" { return Some(data.to_vec()); }
+    let be32 = |o: usize| -> Option<usize> { Some(u32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?) as usize) };
+    let be16 = |o: usize| -> Option<usize> { Some(u16::from_be_bytes(data.get(o..o + 2)?.try_into().ok()?) as usize) };
+    if index as usize >= be32(8)? { return None; }
+    let off = be32(12 + 4 * index as usize)?;
+    let num = be16(off + 4)?;
+    let dir_len = 12 + 16 * num;
+    let mut recs = vec![];
+    for i in 0..num {
+        let r = off + 12 + 16 * i;
+        recs.push((data.get(r..r + 4)?.to_vec(), data.get(r + 4..r + 8)?.to_vec(), be32(r + 8)?, be32(r + 12)?));
+    }
+    let mut body: Vec<u8> = vec![];
+    let mut offs = vec![];
+    for (_, _, o, l) in &recs {
+        offs.push(dir_len + body.len());
+        body.extend_from_slice(data.get(*o..*o + *l)?);
+        while body.len() % 4 != 0 { body.push(0); }
+    }
+    let mut out = data.get(off..off + 12)?.to_vec();
+    for (i, (tag, cs, _, l)) in recs.iter().enumerate() {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(cs);
+        out.extend_from_slice(&(offs[i] as u32).to_be_bytes());
+        out.extend_from_slice(&(*l as u32).to_be_bytes());
+    }
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/// フォントファイルを読む。TTCのときは、family_hint を名前に含む書体を選んで、単独のTTFにする
+fn read_font(path: &Path, family_hint: Option<&str>) -> Option<Vec<u8>> {
+    let data = fs::read(path).ok()?;
+    let mut index = 0u32;
+    if let Some(h) = family_hint {
+        let n = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+        for i in 0..n {
+            if let Ok(face) = ttf_parser::Face::parse(&data, i) {
+                let hit = face.names().into_iter()
+                    .any(|nm| (nm.name_id == 1 || nm.name_id == 16) && nm.to_string().map_or(false, |t| t.contains(h)));
+                if hit { index = i; break; }
+            }
         }
-        names.iter().map(|n| dir.join(n)).find(|p| p.exists())
+    }
+    extract_face(&data, index)
+}
+
+const REG_NAMES: &[&str] = &["NotoSansJP-Regular.ttf", "NotoSansJP-VariableFont_wght.ttf", "NotoSansJP[wght].ttf", "NotoSansJP.ttf",
+                             "NotoSansJP-Regular.otf", "NotoSansCJKjp-Regular.otf", "NotoSansCJK-Regular.ttc"];
+const BOLD_NAMES: &[&str] = &["NotoSansJP-Bold.ttf", "NotoSansJP-Bold.otf", "NotoSansCJKjp-Bold.otf", "NotoSansCJK-Bold.ttc"];
+/// コールサインの等幅フォント（Windows: Consolas / Linux: Inconsolata。画面と同じ）
+fn mono_names() -> &'static [&'static str] {
+    if cfg!(windows) { &["consola.ttf"] }
+    else { &["Inconsolata-Regular.ttf", "Inconsolata[wdth,wght].ttf", "Inconsolata-VariableFont_wdth,wght.ttf", "Inconsolata.ttf", "Inconsolata-Regular.otf", "Inconsolata.otf"] }
+}
+
+/// フォントを探すフォルダ（先頭ほど優先）。Windows・Linux の両方の標準的な場所を含む
+fn font_dirs() -> Vec<PathBuf> {
+    let mut v = vec![exe_dir().join("fonts")];
+    if let Ok(w) = std::env::var("WINDIR") { v.push(PathBuf::from(w).join("Fonts")); }
+    if let Ok(l) = std::env::var("LOCALAPPDATA") { v.push(PathBuf::from(l).join("Microsoft").join("Windows").join("Fonts")); }
+    if let Ok(h) = std::env::var("HOME") {
+        let h = PathBuf::from(h);
+        v.push(h.join(".local/share/fonts"));
+        v.push(h.join(".fonts"));
+    }
+    v.push(PathBuf::from("/usr/local/share/fonts"));
+    v.push(PathBuf::from("/usr/share/fonts"));
+    v
+}
+
+/// フォルダの中（サブフォルダも）のファイルを、（小文字のファイル名, パス）で集める
+fn list_files(dir: &Path, depth: u32, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 { list_files(&p, depth - 1, out); }
+        } else if let Some(n) = p.file_name().and_then(|n| n.to_str()) {
+            out.push((n.to_lowercase(), p));
+        }
+    }
+}
+
+/// PDFに使うフォントを読み込む。次の順に探す
+///   1. setting.json で指定したファイル（font_regular / font_bold / font_mono）
+///   2. 実行ファイルと同じ場所の fonts フォルダ
+///   3. システムのフォントフォルダ（Windows: Windows\Fonts とユーザーのフォント、Linux: /usr/share/fonts など）
+/// 本文・見出しは Noto Sans JP（無ければ Noto Sans CJK JP）、コールサインは Windows が Consolas、Linux が Inconsolata
+fn load_fonts(cfg: &Config) -> Result<Fonts, String> {
+    let dirs = font_dirs();
+    let index: Vec<Vec<(String, PathBuf)>> = dirs.iter().map(|d| {
+        let mut v = vec![];
+        list_files(d, 6, &mut v);
+        v
+    }).collect();
+    let pick = |custom: &Option<String>, names: &[&str], hint: Option<&str>, ok: &dyn Fn(&str) -> bool| -> Option<Vec<u8>> {
+        if let Some(p) = custom {
+            if let Some(d) = read_font(Path::new(p), hint) { return Some(d); }
+        }
+        for files in &index {
+            for n in names {
+                let n = n.to_lowercase();
+                if let Some((_, p)) = files.iter().find(|(f, _)| *f == n) {
+                    if let Some(d) = read_font(p, hint) { return Some(d); }
+                }
+            }
+            // 名前が少し違うファイルも拾う
+            for (_, p) in files.iter().filter(|(f, _)| ok(f)) {
+                if let Some(d) = read_font(p, hint) { return Some(d); }
+            }
+        }
+        None
     };
-    let reg = find(&cfg.font_regular, &["NotoSansJP-Regular.ttf", "NotoSansJP-VariableFont_wght.ttf", "NotoSansJP.ttf"])
-        .ok_or_else(|| format!("フォントが見つかりません。{} に NotoSansJP-Regular.ttf を置いてください", dir.display()))?;
-    let d_regular = fs::read(&reg).map_err(|e| format!("フォントを読めません: {e}"))?;
-    let d_bold = find(&cfg.font_bold, &["NotoSansJP-Bold.ttf"])
-        .and_then(|p| fs::read(p).ok()).unwrap_or_else(|| d_regular.clone());
-    let d_mono = find(&cfg.font_mono, &["NotoSansMono-Regular.ttf", "NotoSansMono-VariableFont_wdth,wght.ttf", "NotoSansMono.ttf"])
-        .and_then(|p| fs::read(p).ok()).unwrap_or_else(|| d_regular.clone());
+    let is_font = |f: &str| f.ends_with(".ttf") || f.ends_with(".otf") || f.ends_with(".ttc");
+    let noto = |f: &str| (f.starts_with("notosansjp") || f.starts_with("notosanscjk")) && is_font(f) && !f.contains("mono") && !f.contains("serif");
+    let weights = ["bold", "black", "thin", "light", "medium", "extra", "demi", "semi"];
+    let ok_regular = |f: &str| noto(f) && !weights.iter().any(|w| f.contains(w));
+    let ok_bold = |f: &str| noto(f) && f.contains("bold") && !f.contains("extra") && !f.contains("semi");
+    let ok_mono = |f: &str| if cfg!(windows) { f == "consola.ttf" }
+                            else { f.starts_with("inconsolata") && is_font(f) && !weights.iter().any(|w| f.contains(w)) };
+    let d_regular = pick(&cfg.font_regular, REG_NAMES, Some("CJK JP"), &ok_regular)
+        .ok_or_else(|| {
+            let seen: Vec<String> = dirs.iter().zip(&index).map(|(d, f)| format!("{}（{}件）", d.display(), f.len())).collect();
+            format!("Noto Sans JP が見つかりません。{} に NotoSansJP-Regular.ttf を置くか、setting.json の font_regular で指定してください。探した場所: {}",
+                    dirs[0].display(), seen.join(" / "))
+        })?;
+    let d_bold = pick(&cfg.font_bold, BOLD_NAMES, Some("CJK JP"), &ok_bold).unwrap_or_else(|| d_regular.clone());
+    let d_mono = pick(&cfg.font_mono, mono_names(), None, &ok_mono).unwrap_or_else(|| d_regular.clone());
     let parse = |d: &Vec<u8>| fontdue::Font::from_bytes(d.as_slice(), fontdue::FontSettings::default())
         .map_err(|e| format!("フォントを解析できません: {e}"));
     let regular = parse(&d_regular)?;
@@ -664,7 +796,7 @@ fn fit_text(f: &fontdue::Font, t: &str, pt: f32, max_mm: f32) -> String {
     let mut out = String::new();
     for c in t.chars() {
         let a = f.metrics(c, pt).advance_width * 25.4 / 72.0;
-        if w + a > max_mm { break; }
+        if w + a > max_mm + 0.05 { break; } // 浮動小数の誤差で最後の1文字が欠けないよう、少し余裕を持たせる
         w += a;
         out.push(c);
     }
@@ -672,6 +804,11 @@ fn fit_text(f: &fontdue::Font, t: &str, pt: f32, max_mm: f32) -> String {
 }
 
 /// 余白（上・下・左・右 [mm]）に従って、全ページの描画命令を作る
+/// セルを等幅フォントで描くか。等幅フォントに無い文字（日本語など）を含むときは、本文フォントにする
+fn use_mono(job: &PrintJob, fonts: &Fonts, c: usize, text: &str) -> bool {
+    job.mono[c] && text.chars().all(|ch| fonts.mono.lookup_glyph_index(ch) != 0)
+}
+
 fn build_pages(job: &PrintJob, fonts: &Fonts) -> Vec<Vec<Cmd>> {
     let (mt, mb, ml, mr) = (job.margins[0] as f32, job.margins[1] as f32, job.margins[2] as f32, job.margins[3] as f32);
     let (body, title) = (9.0_f32, 13.0_f32);
@@ -683,17 +820,29 @@ fn build_pages(job: &PrintJob, fonts: &Fonts) -> Vec<Vec<Cmd>> {
     let foot_h = mm_pt(body) * 1.35 + 2.0;
     let asc = |pt: f32| mm_pt(pt); // 行の上からベースラインまで
 
-    // 列幅：内容の最大幅（上限70mm）。用紙に収まらないときは全体を縮める
+    // 列幅：内容の最大幅（上限70mm）。ただし見出しの幅より狭くはしない。
+    // 用紙に収まらないときは、見出しより広い分だけを縮める。見出しだけでも収まらないときは、見出しの文字を小さくする。
     let n = job.heads.len();
-    let mut cw: Vec<f32> = (0..n).map(|c| {
-        let mut w = text_w(&fonts.bold, &job.heads[c], body);
-        let f = if job.mono[c] { &fonts.mono } else { &fonts.regular };
-        for r in &job.rows { w = w.max(text_w(f, &r[c], body)); if w >= 70.0 { break; } }
-        w.min(70.0) + 2.0 * pad
-    }).collect();
+    let extra = 2.0 * pad + 0.4; // 左右の余白 + 誤差の余裕
     let avail = (PAGE_W - ml - mr).max(30.0);
-    let total: f32 = cw.iter().sum();
-    if total > avail { for w in cw.iter_mut() { *w = *w * avail / total; } }
+    let hw0: Vec<f32> = job.heads.iter().map(|h| text_w(&fonts.bold, h, body)).collect();
+    let hsum: f32 = hw0.iter().sum();
+    let hpt = if hsum + n as f32 * extra > avail { body * ((avail - n as f32 * extra) / hsum).clamp(0.3, 1.0) } else { body };
+    let minw: Vec<f32> = job.heads.iter().map(|h| text_w(&fonts.bold, h, hpt) + extra).collect();
+    let want: Vec<f32> = (0..n).map(|c| {
+        let mut w = 0.0_f32;
+        for r in &job.rows {
+            let f = if use_mono(job, fonts, c, &r[c]) { &fonts.mono } else { &fonts.regular };
+            w = w.max(text_w(f, &r[c], body));
+            if w >= 70.0 { break; }
+        }
+        (w.min(70.0) + extra).max(minw[c])
+    }).collect();
+    let cw: Vec<f32> = if want.iter().sum::<f32>() > avail {
+        let spare = (avail - minw.iter().sum::<f32>()).max(0.0);
+        let grow: f32 = (0..n).map(|c| want[c] - minw[c]).sum();
+        (0..n).map(|c| minw[c] + if grow > 0.0 { (want[c] - minw[c]) * spare / grow } else { 0.0 }).collect()
+    } else { want };
 
     let body_h = PAGE_H - mt - mb - title_h - info_h - foot_h - rh;
     let rpp = ((body_h / rh).floor() as usize).max(1);
@@ -705,10 +854,11 @@ fn build_pages(job: &PrintJob, fonts: &Fonts) -> Vec<Vec<Cmd>> {
             let w = cw[c];
             cmds.push(Cmd::Rect { x, y, w, h: rh, fill: if header { Some(0.91) } else { None }, stroke: true });
             let (fk, f) = if header { (FontKind::Bold, &fonts.bold) }
-                          else if job.mono[c] { (FontKind::Mono, &fonts.mono) }
+                          else if use_mono(job, fonts, c, v) { (FontKind::Mono, &fonts.mono) }
                           else { (FontKind::Regular, &fonts.regular) };
-            let t = fit_text(f, v, body, (w - 2.0 * pad).max(0.0));
-            cmds.push(Cmd::Text { x: x + pad, y: y + vpad + asc(body), size: body, font: fk, text: t });
+            let size = if header { hpt } else { body };
+            let t = fit_text(f, v, size, (w - 2.0 * pad).max(0.0));
+            cmds.push(Cmd::Text { x: x + pad, y: y + vpad + asc(body), size, font: fk, text: t });
             x += w;
         }
     };
@@ -746,16 +896,16 @@ fn make_doc(job: PrintJob, fonts: Arc<Fonts>) -> Doc {
 }
 
 /// PDFファイルに書き出す。使ったフォントは、PDFに埋め込まれる
-fn write_pdf(doc: &Doc, path: &Path) -> Result<(), String> {
+fn write_pdf(title: &str, pages: &[Vec<Cmd>], fonts: &Fonts, path: &Path) -> Result<(), String> {
     use printpdf::path::PaintMode;
     use printpdf::*;
     use std::io::{BufWriter, Cursor};
-    let (pdf, p0, l0) = PdfDocument::new(doc.job.title.as_str(), Mm(PAGE_W as _), Mm(PAGE_H as _), "layer");
-    let load = |k: FontKind| pdf.add_external_font(Cursor::new(doc.fonts.data(k).clone())).map_err(|e| format!("フォントをPDFに埋め込めません: {e}"));
+    let (pdf, p0, l0) = PdfDocument::new(title, Mm(PAGE_W as _), Mm(PAGE_H as _), "layer");
+    let load = |k: FontKind| pdf.add_external_font(Cursor::new(fonts.data(k).clone())).map_err(|e| format!("フォントをPDFに埋め込めません: {e}"));
     let f_reg = load(FontKind::Regular)?;
-    let f_bold = load(FontKind::Bold)?;
-    let f_mono = load(FontKind::Mono)?;
-    for (i, cmds) in doc.pages.iter().enumerate() {
+    let f_bold = if fonts.d_bold == fonts.d_regular { f_reg.clone() } else { load(FontKind::Bold)? };
+    let f_mono = if fonts.d_mono == fonts.d_regular { f_reg.clone() } else { load(FontKind::Mono)? };
+    for (i, cmds) in pages.iter().enumerate() {
         let layer = if i == 0 {
             pdf.get_page(p0).get_layer(l0)
         } else {
@@ -898,6 +1048,7 @@ fn fit_to_screen(ui: &MainWindow) {
 // ---------------------------------------------------------------- main
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
+    ui.global::<Metrics>().set_mono_font(if cfg!(windows) { "Consolas" } else { "Inconsolata" }.into());
     let mut cfg = Config::load();
     // 一時的に1.5倍にして保存した列幅（cols_ver == 1）を元の大きさに戻す
     if cfg.cols_ver < 2 {
@@ -909,8 +1060,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let num = Arc::new(load_num(&num_path(&cfg)));
     let asc = cfg.sort_asc;
+    let mut last: [String; 5] = Default::default();
+    for (i, v) in cfg.last.iter().take(5).enumerate() { last[i] = v.clone(); }
     let app: Shared = Rc::new(RefCell::new(App {
-        cfg, file: None, recs: vec![], num, last: Default::default(), editing: None, orig: None,
+        cfg, file: None, recs: vec![], num, last, editing: None, orig: None,
         hist_call: String::new(), hist_asc: asc, list_asc: asc, query: String::new(), d_num: None, doc: None, fonts: None,
     }));
 
@@ -939,7 +1092,11 @@ fn main() -> Result<(), slint::PlatformError> {
     bk.on_cycle(|k, t, d| cycle(k, &t, d).into());
     bk.on_byte_len(|t| t.len() as i32);
     { let a = app.clone();
-      bk.on_last(move |k| a.try_borrow().map(|s| s.last[k as usize].clone()).unwrap_or_default().into()); }
+      bk.on_last(move |k| {
+          let k = (k as usize).min(4);
+          a.try_borrow().map(|s| if k >= 3 { rst_start(&s.last[k]) } else { s.last[k].clone() }).unwrap_or_default().into()
+      }); }
+    bk.on_rst_step(|t, d| rst_step(&t, d).into());
 
     // 画面遷移
     { let (w, a) = (ui.as_weak(), app.clone());
@@ -1032,15 +1189,42 @@ fn main() -> Result<(), slint::PlatformError> {
       }); }
     { let (w, a) = (ui.as_weak(), app.clone());
       bk.on_save_pdf(move || {
-          let ui = w.unwrap(); let s = a.borrow();
-          if let Some(doc) = &s.doc {
-              if let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name("logbook.pdf").save_file() {
-                  match write_pdf(doc, &p) {
-                      Ok(()) => status(&ui, &format!("PDFを保存しました: {}", p.display())),
-                      Err(e) => status(&ui, &e),
+          let ui = w.unwrap(); let bk = ui.global::<Backend>();
+          if bk.get_pdf_busy() { return; }
+          let (title, pages, fonts) = {
+              let s = a.borrow();
+              match &s.doc { Some(d) => (d.job.title.clone(), d.pages.clone(), d.fonts.clone()), None => return }
+          };
+          bk.set_pdf_busy(true);
+          status(&ui, "保存先を選んでください");
+          // 保存先ダイアログとPDFの作成は別スレッドで行う（画面の処理を止めない・RefCellを借りたままにしない）
+          let weak = ui.as_weak();
+          std::thread::spawn(move || {
+              let msg = match rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name("logbook.pdf").save_file() {
+                  None => String::new(),
+                  Some(mut p) => {
+                      if p.extension().is_none() { p.set_extension("pdf"); }
+                      let _ = weak.clone().upgrade_in_event_loop(|ui| status(&ui, "PDFを作っています…"));
+                      match write_pdf(&title, &pages, &fonts, &p) {
+                          Ok(()) => format!("PDFを保存しました: {}", p.display()),
+                          Err(e) => e,
+                      }
                   }
-              }
-          }
+              };
+              let _ = weak.upgrade_in_event_loop(move |ui| {
+                  ui.global::<Backend>().set_pdf_busy(false);
+                  status(&ui, &msg);
+              });
+          });
+      }); }
+    // PDF出力画面を閉じる：画像とデータを手放して、キーボードの入力先を元の画面に戻す
+    { let (w, a) = (ui.as_weak(), app.clone());
+      bk.on_preview_close(move || {
+          let ui = w.unwrap(); let bk = ui.global::<Backend>();
+          bk.set_preview_open(false);
+          bk.set_preview_image(slint::Image::default());
+          if let Ok(mut s) = a.try_borrow_mut() { s.doc = None; }
+          bump_focus(&ui);
       }); }
 
     // 入力のクリア（日付欄へ）
@@ -1144,9 +1328,11 @@ fn main() -> Result<(), slint::PlatformError> {
           if !bad.is_empty() { status(&ui, &format!("形式が正しくありません: {}", bad.join("・"))); return; }
           s.recs.push(rec.clone());
           if let Err(e) = persist(&s) { s.recs.pop(); status(&ui, &e); return; }
-          for (i, v) in [&rec.freq, &rec.mode, &rec.power].into_iter().enumerate() {
+          for (i, v) in [&rec.freq, &rec.mode, &rec.power, &rec.rst_s, &rec.rst_r].into_iter().enumerate() {
               if !v.is_empty() { s.last[i] = v.clone(); }
           }
+          s.cfg.last = s.last.to_vec();
+          s.cfg.save();
           ui.global::<Form>().invoke_clear();
           s.hist_call.clear();
           refresh_hist(&ui, &s);

@@ -60,6 +60,7 @@ export global Backend {
     in-out property <bool> show-seconds: true;
     in-out property <bool> show-popup: true;
     in-out property <bool> preview-open: false;
+    in-out property <bool> pdf-busy: false;   // PDFを保存している間 true
     in-out property <image> preview-image;
     in-out property <int> preview-page: 0;
     in-out property <int> preview-pages: 1;
@@ -96,6 +97,7 @@ export global Backend {
     callback settings-open();
     callback settings-save();
     callback preview-goto(int);
+    callback preview-close();
     callback save-pdf();
     callback margins-changed();
     callback clear-form();
@@ -105,7 +107,14 @@ export global Backend {
     callback filter(int, string, int) -> Edit;
     callback cycle(int, string, int) -> string;
     callback byte-len(string) -> int;
-    callback last(int) -> string;    // 0=周波数 1=モード 2=出力
+    callback rst-step(string, int) -> string;   // RSTの↑↓（d=+1/-1）
+    callback last(int) -> string;    // 0=周波数 1=モード 2=出力 3=RST(S)の開始値 4=RST(R)の開始値
+}
+
+// 編集メニュー（切り取り・コピー・貼り付け）の指示。フォーカスのある入力欄だけが実行する
+global Clip {
+    in-out property <int> cmd: 0;    // 0=切り取り 1=コピー 2=貼り付け
+    in-out property <int> tick: 0;
 }
 
 export global Theme {
@@ -143,7 +152,12 @@ export global Theme {
     out property <color> err: dark ? #ff7b7b : #c62828;
 }
 
-global Metrics { out property <length> cw: 12px; }
+export global Metrics {
+    out property <length> cw: 12px;
+    out property <string> ui-font: "Noto Sans JP";   // 画面の標準フォント
+    // コールサインの等幅フォント。起動時に main.rs が OS に合わせて入れる（Windows: Consolas / Linux: Inconsolata）
+    in-out property <string> mono-font: "Consolas";
+}
 export global Cols {
     in-out property <length> date: 130px;
     in-out property <length> t-start: 70px;
@@ -167,6 +181,7 @@ component Field inherits Rectangle {
     in property <int> kind: -1;
     in property <int> opt-kind: -1;
     in property <bool> mono: false;
+    in property <bool> rst: false;   // RST欄：↑↓でSの桁を1〜9で増減
     in property <bool> display: false;
     in property <bool> active: true;
     in property <bool> locked: false;
@@ -182,6 +197,14 @@ component Field inherits Rectangle {
     public function cursor-end() {
         ti.set-selection-offsets(Backend.byte-len(ti.text), Backend.byte-len(ti.text));
     }
+    property <int> clip-tick: Clip.tick;
+    changed clip-tick => {
+        if (ti.has-focus) {
+            if (Clip.cmd == 0) { ti.cut(); }
+            else if (Clip.cmd == 1) { ti.copy(); }
+            else { ti.paste(); }
+        }
+    }
     height: 36px;
     background: !root.active ? Theme.field-off : root.display ? Theme.field-display : Theme.field;
     border-width: ti.has-focus ? 3px : 1px;
@@ -192,6 +215,11 @@ component Field inherits Rectangle {
         capture-key-pressed(e) => {
             if (e.text == Key.UpArrow || e.text == Key.DownArrow) {
                 let d = e.text == Key.UpArrow ? 1 : -1;
+                if (root.rst) {
+                    ti.text = Backend.rst-step(ti.text, d);
+                    root.cursor-end();
+                    return EventResult.accept;
+                }
                 if (root.kind == 2 || root.kind == 3) {
                     let r = Backend.step(root.kind, ti.text, ti.cursor-position-byte-offset, d);
                     ti.text = r.text;
@@ -206,11 +234,16 @@ component Field inherits Rectangle {
             if (root.own-tab) {
                 if (e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
                 if (e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
-                if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)) {
+                // ←：前項目へ（Shift・Ctrl・Alt を押しているときは、ふつうのカーソル移動）
+                if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)
+                    || (e.text == Key.LeftArrow && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt)) {
                     root.tab-prev();
                     return EventResult.accept;
                 }
-                if (e.text == Key.PageDown || (e.text == Key.Tab && !e.modifiers.shift)) {
+                // Enter・→：入力を確定して次項目へ
+                if (e.text == Key.PageDown || e.text == Key.Return
+                    || (e.text == Key.RightArrow && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt)
+                    || (e.text == Key.Tab && !e.modifiers.shift)) {
                     root.accepted();
                     root.tab-next();
                     return EventResult.accept;
@@ -227,7 +260,7 @@ component Field inherits Rectangle {
             vertical-alignment: center;
             enabled: root.active && !root.display;
             read-only: root.locked;
-            font-family: root.mono ? "Consolas" : "";
+            font-family: root.mono ? Metrics.mono-font : "";
             color: Theme.text;
             selection-background-color: Theme.sel-bg;
             selection-foreground-color: Theme.sel-fg;
@@ -263,7 +296,7 @@ component Choice inherits Rectangle {
     bx := Field {
         x: 0px; y: 0px;
         width: root.width - 26px;
-        kind: 4;
+        kind: 4; mono: true;
         opt-kind: root.opt-kind;
         locked: !root.editable;
         own-tab: root.own-tab;
@@ -333,11 +366,11 @@ component Btn inherits Rectangle {
     fs := FocusScope {
         enabled: !root.tab-skip && !root.label-only;
         key-pressed(e) => {
-            if (root.own-tab && ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.PageDown)) {
+            if (root.own-tab && ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.PageDown || e.text == Key.RightArrow)) {
                 root.tab-next();
                 return EventResult.accept;
             }
-            if (root.own-prev && (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift))) {
+            if (root.own-prev && (e.text == Key.PageUp || e.text == Key.Backtab || e.text == Key.LeftArrow || (e.text == Key.Tab && e.modifiers.shift))) {
                 root.tab-prev();
                 return EventResult.accept;
             }
@@ -437,20 +470,20 @@ component RowLine inherits Rectangle {
     HorizontalLayout {
         padding-left: 6px;
         spacing: 6px;
-        if Backend.col-show[0]: Cell { preferred-width: Cols.date; text: root.r.date; }
-        if Backend.col-show[1]: Cell { preferred-width: Cols.t-start; text: root.r.t-start; }
-        if Backend.col-show[2]: Cell { preferred-width: Cols.t-end; text: root.r.t-end; }
-        if Backend.col-show[3]: Cell { preferred-width: Cols.call; text: root.r.call; font-family: "Consolas"; }
-        if Backend.col-show[4]: Cell { preferred-width: Cols.rst-s; text: root.r.rst-s; }
-        if Backend.col-show[5]: Cell { preferred-width: Cols.rst-r; text: root.r.rst-r; }
-        if Backend.col-show[6]: Cell { preferred-width: Cols.freq; text: root.r.freq; }
-        if Backend.col-show[7]: Cell { preferred-width: Cols.mode; text: root.r.mode; }
-        if Backend.col-show[8]: Cell { preferred-width: Cols.power; text: root.r.power; }
+        if Backend.col-show[0]: Cell { preferred-width: Cols.date; text: root.r.date; font-family: Metrics.mono-font; }
+        if Backend.col-show[1]: Cell { preferred-width: Cols.t-start; text: root.r.t-start; font-family: Metrics.mono-font; }
+        if Backend.col-show[2]: Cell { preferred-width: Cols.t-end; text: root.r.t-end; font-family: Metrics.mono-font; }
+        if Backend.col-show[3]: Cell { preferred-width: Cols.call; text: root.r.call; font-family: Metrics.mono-font; }
+        if Backend.col-show[4]: Cell { preferred-width: Cols.rst-s; text: root.r.rst-s; font-family: Metrics.mono-font; }
+        if Backend.col-show[5]: Cell { preferred-width: Cols.rst-r; text: root.r.rst-r; font-family: Metrics.mono-font; }
+        if Backend.col-show[6]: Cell { preferred-width: Cols.freq; text: root.r.freq; font-family: Metrics.mono-font; }
+        if Backend.col-show[7]: Cell { preferred-width: Cols.mode; text: root.r.mode; font-family: Metrics.mono-font; }
+        if Backend.col-show[8]: Cell { preferred-width: Cols.power; text: root.r.power; font-family: Metrics.mono-font; }
         if Backend.col-show[9]: Cell { preferred-width: Cols.name; text: root.r.name; }
         if Backend.col-show[10]: Cell { preferred-width: Cols.qth; text: root.r.qth; }
         if Backend.col-show[11]: Cell { preferred-width: Cols.loc; text: root.r.loc; }
-        if Backend.col-show[12]: Cell { preferred-width: Cols.num; text: root.r.num; }
-        if Backend.col-show[13]: Cell { preferred-width: Cols.spec; text: root.r.spec; }
+        if Backend.col-show[12]: Cell { preferred-width: Cols.num; text: root.r.num; font-family: Metrics.mono-font; }
+        if Backend.col-show[13]: Cell { preferred-width: Cols.spec; text: root.r.spec; font-family: Metrics.mono-font; }
         if Backend.col-show[14]: Cell { text: root.r.memo; horizontal-stretch: 1; }
         if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
     }
@@ -608,6 +641,14 @@ component InputScreen inherits Rectangle {
     property <int> tick: Backend.focus-tick;
     changed tick => { date-f.focus-input(); }
     init => { date-f.focus-input(); }
+    property <int> clip-tick: Clip.tick;
+    changed clip-tick => {
+        if (memo-te.has-focus) {
+            if (Clip.cmd == 0) { memo-te.cut(); }
+            else if (Clip.cmd == 1) { memo-te.copy(); }
+            else { memo-te.paste(); }
+        }
+    }
     Timer {
         interval: 60ms;
         running: true;
@@ -627,14 +668,14 @@ component InputScreen inherits Rectangle {
                 FieldLabel {
                     label: "日付"; preferred-width: Metrics.cw * 10 + 22px;
                     date-f := Field {
-                        kind: 2; own-tab: true; tab-next => { start-f.focus-input(); } tab-prev => { Backend.end-tick += 1; } text <=> Form.date;
+                        kind: 2; mono: true; own-tab: true; tab-next => { start-f.focus-input(); } tab-prev => { Backend.end-tick += 1; } text <=> Form.date;
                         focus-gained => { if (Form.date == "") { Form.date = Backend.now(0); } self.cursor-end(); }
                     }
                 }
                 FieldLabel {
                     label: "開始時刻"; preferred-width: Metrics.cw * 5 + 24px;
                     start-f := Field {
-                        kind: 3; own-tab: true; tab-next => { call-f.focus-input(); } tab-prev => { date-f.focus-input(); } text <=> Form.t-start;
+                        kind: 3; mono: true; own-tab: true; tab-next => { call-f.focus-input(); } tab-prev => { date-f.focus-input(); } text <=> Form.t-start;
                         focus-gained => { if (Form.t-start == "") { Form.t-start = Backend.now(1); } self.cursor-end(); }
                     }
                 }
@@ -645,8 +686,8 @@ component InputScreen inherits Rectangle {
                         accepted => { Backend.lookup(self.text); }
                     }
                 }
-                FieldLabel { label: "RST(S)"; preferred-width: Metrics.cw * 4 + 14px; rsts-f := Field { kind: 1; own-tab: true; tab-next => { rstr-f.focus-input(); } tab-prev => { call-f.focus-input(); } text <=> Form.rst-s; } }
-                FieldLabel { label: "RST(R)"; preferred-width: Metrics.cw * 4 + 14px; rstr-f := Field { kind: 1; own-tab: true; tab-next => { freq-c.focus-input(); } tab-prev => { rsts-f.focus-input(); } text <=> Form.rst-r; } }
+                FieldLabel { label: "RST(S)"; preferred-width: Metrics.cw * 4 + 14px; rsts-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-s == "") { Form.rst-s = Backend.last(3); } self.cursor-end(); } tab-next => { rstr-f.focus-input(); } tab-prev => { call-f.focus-input(); } text <=> Form.rst-s; } }
+                FieldLabel { label: "RST(R)"; preferred-width: Metrics.cw * 4 + 14px; rstr-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-r == "") { Form.rst-r = Backend.last(4); } self.cursor-end(); } tab-next => { freq-c.focus-input(); } tab-prev => { rsts-f.focus-input(); } text <=> Form.rst-r; } }
                 FieldLabel {
                     label: "周波数"; preferred-width: Metrics.cw * 9 + 30px;
                     freq-c := Choice {
@@ -717,11 +758,11 @@ component InputScreen inherits Rectangle {
             }
             FieldLabel {
                 label: "市郡区ナンバー"; preferred-width: Metrics.cw * 15 + 22px;
-                Field { display: true; active: Backend.use-api; text: Form.num; }
+                Field { display: true; mono: true; active: Backend.use-api; text: Form.num; }
             }
             FieldLabel {
                 label: "一括表示"; preferred-width: Metrics.cw * 15 + 22px;
-                Field { display: true; active: Backend.use-api; text: Form.spec; }
+                Field { display: true; mono: true; active: Backend.use-api; text: Form.spec; }
             }
         }
 
@@ -732,7 +773,7 @@ component InputScreen inherits Rectangle {
             FieldLabel {
                 label: "終了時刻"; preferred-width: Metrics.cw * 5 + 24px;
                 end-f := Field {
-                    kind: 3; own-tab: true; tab-next => { Backend.end-tick += 1; } tab-prev => { memo-fs.focus(); } text <=> Form.t-end;
+                    kind: 3; mono: true; own-tab: true; tab-next => { Backend.end-tick += 1; } tab-prev => { memo-fs.focus(); } text <=> Form.t-end;
                     focus-gained => { if (Form.t-end == "") { Form.t-end = Backend.now(1); } self.cursor-end(); }
                 }
             }
@@ -932,7 +973,7 @@ component PreviewScreen inherits Rectangle {
     TouchArea { }   // 下の画面へのクリックを通さない
     pfs := FocusScope {
         key-pressed(e) => {
-            if (e.text == Key.Escape) { Backend.preview-open = false; return EventResult.accept; }
+            if (e.text == Key.Escape) { Backend.preview-close(); return EventResult.accept; }
             if (e.text == Key.PageDown || e.text == Key.RightArrow || e.text == Key.DownArrow) { Backend.preview-goto(Backend.preview-page + 1); return EventResult.accept; }
             if (e.text == Key.PageUp || e.text == Key.LeftArrow || e.text == Key.UpArrow) { Backend.preview-goto(Backend.preview-page - 1); return EventResult.accept; }
             if (e.text == Key.Home) { Backend.preview-goto(0); return EventResult.accept; }
@@ -949,8 +990,8 @@ component PreviewScreen inherits Rectangle {
                 Btn { label: "前のページ"; tab-skip: true; clicked => { Backend.preview-goto(Backend.preview-page - 1); } }
                 Btn { label: "次のページ"; tab-skip: true; clicked => { Backend.preview-goto(Backend.preview-page + 1); } }
                 Text { text: "\{Backend.preview-page + 1} / \{Backend.preview-pages}"; font-size: 20px; color: Theme.text; vertical-alignment: center; }
-                Btn { label: "PDF保存"; tab-skip: true; clicked => { Backend.save-pdf(); } }
-                Btn { label: "閉じる"; tab-skip: true; clicked => { Backend.preview-open = false; } }
+                Btn { label: Backend.pdf-busy ? "保存中…" : "PDF保存"; tab-skip: true; clicked => { Backend.save-pdf(); } }
+                Btn { label: "閉じる"; tab-skip: true; clicked => { Backend.preview-close(); } }
                 Text { text: Backend.status; font-size: 16px; color: Theme.err; vertical-alignment: center; }
             }
             HorizontalLayout {
@@ -979,7 +1020,7 @@ export component MainWindow inherits Window {
     title: "GOAT LOGBOOK";
     icon: @image-url("../assets/Icon.png");
     default-font-size: 21px;
-    default-font-family: "Yu Gothic UI";
+    default-font-family: Metrics.ui-font;
     preferred-width: 1000px;
     preferred-height: 650px;
     min-width: 900px;
@@ -1024,7 +1065,10 @@ export component MainWindow inherits Window {
                     title: "ファイル"; open: root.open-menu == 0;
                     clicked => { root.open-menu = root.open-menu == 0 ? -1 : 0; }
                 }
-                MenuHead { title: "編集"; }
+                mh1 := MenuHead {
+                    title: "編集"; open: root.open-menu == 1;
+                    clicked => { root.open-menu = root.open-menu == 1 ? -1 : 1; }
+                }
                 mh2 := MenuHead {
                     title: "設定"; open: root.open-menu == 2 || root.open-menu == 3;
                     clicked => {
@@ -1037,14 +1081,14 @@ export component MainWindow inherits Window {
             Text {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
                 text: Backend.my-call == "" ? "GOAT LogBook" : "Radio Station  " + Backend.my-call + "　GOAT LogBook";
-                font-family: "Consolas"; font-size: 20px;
+                font-family: Metrics.mono-font; font-size: 20px;
                 color: Theme.text; horizontal-alignment: center; vertical-alignment: center;
             }
             Text {
                 visible: Backend.show-clock;
                 x: parent.width - 250px; y: 0px; width: 138px; height: parent.height;
                 text: Backend.clock-text;
-                font-family: "Consolas"; font-size: 25.2px;
+                font-family: Metrics.mono-font; font-size: 25.2px;
                 color: Theme.text; horizontal-alignment: right; vertical-alignment: center;
             }
         }
@@ -1071,6 +1115,11 @@ export component MainWindow inherits Window {
         x: mh0.absolute-position.x; y: 30px;
         items: ["ファイルを開く…", "ファイルを新規作成…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
         picked(i) => { root.open-menu = -1; Backend.menu(0, i); }
+    }
+    if root.open-menu == 1: MenuPanel {
+        x: mh1.absolute-position.x; y: 30px;
+        items: ["切り取り", "コピー", "貼り付け"];
+        picked(i) => { root.open-menu = -1; Clip.cmd = i; Clip.tick += 1; }
     }
     if root.open-menu == 2: MenuPanel {
         x: mh2.absolute-position.x; y: 30px;
