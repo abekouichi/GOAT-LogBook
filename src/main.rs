@@ -227,11 +227,12 @@ fn refresh_hist(ui: &MainWindow, s: &App) {
 
 fn status(ui: &MainWindow, msg: &str) { ui.global::<Backend>().set_status(msg.into()); }
 
-/// 入力中の内容があるか（自動入力される日付・時刻・周波数・モード・出力は除く）
-fn has_input(ui: &MainWindow) -> bool {
+/// 入力中の内容があるか（自動入力される日付・時刻・周波数・モード・出力は除く。RSTは、自動で入る開始値のままなら除く）
+fn has_input(ui: &MainWindow, last: &[String; 5]) -> bool {
     let f = ui.global::<Form>();
-    [f.get_call(), f.get_rst_s(), f.get_rst_r(), f.get_name(), f.get_qth(), f.get_memo()]
-        .iter().any(|v| !v.is_empty())
+    let (rs, rr) = (f.get_rst_s(), f.get_rst_r());
+    let rst_typed = (!rs.is_empty() && rs.as_str() != rst_start(&last[3])) || (!rr.is_empty() && rr.as_str() != rst_start(&last[4]));
+    rst_typed || [f.get_call(), f.get_name(), f.get_qth(), f.get_memo()].iter().any(|v| !v.is_empty())
 }
 
 /// 一覧・履歴の表示項目（15個）。未設定なら全部表示
@@ -1107,7 +1108,7 @@ fn main() -> Result<(), slint::PlatformError> {
               return;
           }
           if n == 1 {
-              if has_input(&ui) {
+              if has_input(&ui, &s.last) {
                   status(&ui, "入力中の内容があります。「保存して次入力」するか「クリア」してください");
                   return;
               }
