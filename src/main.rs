@@ -14,6 +14,11 @@ use std::{
 
 slint::include_modules!();
 
+// ヘルプに表示する文章（アプリに内蔵）。取扱説明書を直したときは docs/manual.txt も直す
+const FAQ_TEXT: &str = include_str!("../docs/faq.txt");
+const MANUAL_TEXT: &str = include_str!("../docs/manual.txt");
+const LICENSE_TEXT: &str = include_str!("../LICENSE");
+
 const FREQS: [&str; 17] = ["1.9MHz", "3.5MHz", "3.8MHz", "7MHz", "10MHz", "14MHz", "18MHz", "21MHz", "24MHz", "28MHz",
                            "50MHz", "144MHz", "430MHz", "1200MHz", "2400MHz", "5600MHz", "10.1GHz"];
 const MODES: [&str; 7] = ["CW", "SSB", "AM", "FM", "FT8", "RTTY", "SSTV"];
@@ -612,7 +617,7 @@ fn build_job(s: &App) -> Result<PrintJob, String> {
     let mut info = format!("出力日時: {}　／　{}件", Local::now().format("%Y/%m/%d %H:%M"), rows.len());
     if !s.cfg.my_call.is_empty() { info = format!("{}　／　{}", s.cfg.my_call, info); }
     if !s.query.is_empty() { info.push_str(&format!("　／　検索: {}", s.query)); }
-    let mono: Vec<bool> = cols.iter().map(|&c| matches!(c, 0..=8 | 12 | 13)).collect(); // 日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示は等幅（Windows: Consolas / Linux: Inconsolata）
+    let mono: Vec<bool> = cols.iter().map(|&c| matches!(c, 0..=8 | 12 | 13)).collect(); // 日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示は等幅（Windows: Consolas / Linux: Inconsolata、無ければ DejaVu Sans Mono など）
     Ok(PrintJob { title, info, heads: hv, rows, mono, margins: margins_of(&s.cfg) })
 }
 
@@ -700,10 +705,17 @@ fn read_font(path: &Path, family_hint: Option<&str>) -> Option<Vec<u8>> {
 const REG_NAMES: &[&str] = &["NotoSansJP-Regular.ttf", "NotoSansJP-VariableFont_wght.ttf", "NotoSansJP[wght].ttf", "NotoSansJP.ttf",
                              "NotoSansJP-Regular.otf", "NotoSansCJKjp-Regular.otf", "NotoSansCJK-Regular.ttc"];
 const BOLD_NAMES: &[&str] = &["NotoSansJP-Bold.ttf", "NotoSansJP-Bold.otf", "NotoSansCJKjp-Bold.otf", "NotoSansCJK-Bold.ttc"];
-/// コールサインの等幅フォント（Windows: Consolas / Linux: Inconsolata。画面と同じ）
+/// 等幅フォントのファイル名（先頭ほど優先）。Windows は Consolas、Linux は Inconsolata を優先し、
+/// 無ければ Linux に多い等幅フォント（DejaVu Sans Mono など）を使う。画面とPDFで同じフォントを使う
 fn mono_names() -> &'static [&'static str] {
     if cfg!(windows) { &["consola.ttf"] }
-    else { &["Inconsolata-Regular.ttf", "Inconsolata[wdth,wght].ttf", "Inconsolata-VariableFont_wdth,wght.ttf", "Inconsolata.ttf", "Inconsolata-Regular.otf", "Inconsolata.otf"] }
+    else {
+        &["Inconsolata-Regular.ttf", "Inconsolata[wdth,wght].ttf", "Inconsolata-VariableFont_wdth,wght.ttf", "Inconsolata.ttf",
+          "DejaVuSansMono.ttf", "LiberationMono-Regular.ttf",
+          "NotoSansMono-Regular.ttf", "NotoSansMono[wdth,wght].ttf", "NotoSansMono-VariableFont_wdth,wght.ttf",
+          "UbuntuMono-R.ttf", "UbuntuMono-Regular.ttf", "Cousine-Regular.ttf",
+          "Inconsolata-Regular.otf", "Inconsolata.otf"]
+    }
 }
 
 /// フォントを探すフォルダ（先頭ほど優先）。Windows・Linux の両方の標準的な場所を含む
@@ -732,6 +744,54 @@ fn list_files(dir: &Path, depth: u32, out: &mut Vec<(String, PathBuf)>) {
             out.push((n.to_lowercase(), p));
         }
     }
+}
+
+fn is_font_file(f: &str) -> bool { f.ends_with(".ttf") || f.ends_with(".otf") || f.ends_with(".ttc") }
+
+/// 名前が少し違う等幅フォントのファイルも拾う（太字・斜体などは除く）
+fn ok_mono_file(f: &str) -> bool {
+    if cfg!(windows) { return f == "consola.ttf"; }
+    let skip = ["bold", "black", "thin", "light", "medium", "extra", "demi", "semi", "italic", "oblique"];
+    ["inconsolata", "dejavusansmono", "liberationmono", "notosansmono", "ubuntumono", "cousine"].iter().any(|p| f.starts_with(p))
+        && is_font_file(f) && !skip.iter().any(|w| f.contains(w))
+}
+
+/// 等幅フォントのデータを探す（setting.json の font_mono → 各フォルダの順）。見つからなければ None
+fn find_mono_data(cfg: &Config) -> Option<Vec<u8>> {
+    if let Some(p) = &cfg.font_mono {
+        if let Some(d) = read_font(Path::new(p), None) { return Some(d); }
+    }
+    for dir in font_dirs() {
+        let mut files = vec![];
+        list_files(&dir, 6, &mut files);
+        for n in mono_names() {
+            let n = n.to_lowercase();
+            if let Some((_, p)) = files.iter().find(|(f, _)| *f == n) {
+                if let Some(d) = read_font(p, None) { return Some(d); }
+            }
+        }
+        for (_, p) in files.iter().filter(|(f, _)| ok_mono_file(f)) {
+            if let Some(d) = read_font(p, None) { return Some(d); }
+        }
+    }
+    None
+}
+
+/// フォントデータから、ファミリー名（画面で font-family に指定する名前）を読む
+fn family_name(data: &[u8]) -> Option<String> {
+    let face = ttf_parser::Face::parse(data, 0).ok()?;
+    for nm in face.names() {
+        if nm.name_id == 1 && nm.is_unicode() {
+            if let Some(t) = nm.to_string() { return Some(t); }
+        }
+    }
+    None
+}
+
+/// 画面で使う等幅フォントの名前。PDFと同じフォントファイルから名前を読むので、画面とPDFがそろう
+fn mono_family(cfg: &Config) -> String {
+    find_mono_data(cfg).and_then(|d| family_name(&d))
+        .unwrap_or_else(|| if cfg!(windows) { "Consolas".into() } else { "DejaVu Sans Mono".into() })
 }
 
 /// PDFに使うフォントを読み込む。次の順に探す
@@ -766,11 +826,9 @@ fn load_fonts(cfg: &Config) -> Result<Fonts, String> {
     };
     let is_font = |f: &str| f.ends_with(".ttf") || f.ends_with(".otf") || f.ends_with(".ttc");
     let noto = |f: &str| (f.starts_with("notosansjp") || f.starts_with("notosanscjk")) && is_font(f) && !f.contains("mono") && !f.contains("serif");
-    let weights = ["bold", "black", "thin", "light", "medium", "extra", "demi", "semi"];
+    let weights = ["bold", "black", "thin", "light", "medium", "extra", "demi", "semi", "italic", "oblique"];
     let ok_regular = |f: &str| noto(f) && !weights.iter().any(|w| f.contains(w));
     let ok_bold = |f: &str| noto(f) && f.contains("bold") && !f.contains("extra") && !f.contains("semi");
-    let ok_mono = |f: &str| if cfg!(windows) { f == "consola.ttf" }
-                            else { f.starts_with("inconsolata") && is_font(f) && !weights.iter().any(|w| f.contains(w)) };
     let d_regular = pick(&cfg.font_regular, REG_NAMES, Some("CJK JP"), &ok_regular)
         .ok_or_else(|| {
             let seen: Vec<String> = dirs.iter().zip(&index).map(|(d, f)| format!("{}（{}件）", d.display(), f.len())).collect();
@@ -778,7 +836,7 @@ fn load_fonts(cfg: &Config) -> Result<Fonts, String> {
                     dirs[0].display(), seen.join(" / "))
         })?;
     let d_bold = pick(&cfg.font_bold, BOLD_NAMES, Some("CJK JP"), &ok_bold).unwrap_or_else(|| d_regular.clone());
-    let d_mono = pick(&cfg.font_mono, mono_names(), None, &ok_mono).unwrap_or_else(|| d_regular.clone());
+    let d_mono = find_mono_data(cfg).unwrap_or_else(|| d_regular.clone());
     let parse = |d: &Vec<u8>| fontdue::Font::from_bytes(d.as_slice(), fontdue::FontSettings::default())
         .map_err(|e| format!("フォントを解析できません: {e}"));
     let regular = parse(&d_regular)?;
@@ -1049,8 +1107,8 @@ fn fit_to_screen(ui: &MainWindow) {
 // ---------------------------------------------------------------- main
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
-    ui.global::<Metrics>().set_mono_font(if cfg!(windows) { "Consolas" } else { "Inconsolata" }.into());
     let mut cfg = Config::load();
+    ui.global::<Metrics>().set_mono_font(mono_family(&cfg).into());
     // 一時的に1.5倍にして保存した列幅（cols_ver == 1）を元の大きさに戻す
     if cfg.cols_ver < 2 {
         if cfg.cols_ver == 1 && !cfg.cols.is_empty() {
@@ -1187,6 +1245,19 @@ fn main() -> Result<(), slint::PlatformError> {
           if let Some(doc) = &s.doc {
               if let Err(e) = show_preview(&ui, doc, bk.get_preview_page().max(0) as usize) { status(&ui, &e); }
           }
+      }); }
+    // ヘルプ：FAQ・取扱説明書・ライセンス（文章はアプリに内蔵）
+    { let w = ui.as_weak();
+      bk.on_show_help(move |i| {
+          let ui = w.unwrap(); let bk = ui.global::<Backend>();
+          let (title, text) = match i {
+              0 => ("FAQ（よくある質問）", FAQ_TEXT),
+              1 => ("取扱説明書", MANUAL_TEXT),
+              _ => ("ライセンス（MIT）", LICENSE_TEXT),
+          };
+          bk.set_help_title(title.into());
+          bk.set_help_text(text.into());
+          bk.set_help_open(true);
       }); }
     { let (w, a) = (ui.as_weak(), app.clone());
       bk.on_save_pdf(move || {

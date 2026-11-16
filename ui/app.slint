@@ -60,6 +60,9 @@ export global Backend {
     in-out property <bool> show-seconds: true;
     in-out property <bool> show-popup: true;
     in-out property <bool> preview-open: false;
+    in-out property <bool> help-open: false;
+    in-out property <string> help-title;
+    in-out property <string> help-text;
     in-out property <bool> pdf-busy: false;   // PDFを保存している間 true
     in-out property <image> preview-image;
     in-out property <int> preview-page: 0;
@@ -99,6 +102,7 @@ export global Backend {
     callback preview-goto(int);
     callback preview-close();
     callback save-pdf();
+    callback show-help(int);
     callback margins-changed();
     callback clear-form();
     callback search(string);
@@ -962,6 +966,35 @@ component ListScreen inherits Rectangle {
 }
 
 // ---- 印刷プレビュー ------------------------------------------------------------------
+// ---- ヘルプ（FAQ・取扱説明書・ライセンス）-----------------------------------------------
+component HelpScreen inherits Rectangle {
+    background: Theme.bg;
+    init => { hfs.focus(); }
+    Timer {
+        interval: 60ms;
+        running: true;
+        triggered => { self.running = false; hfs.focus(); }
+    }
+    TouchArea { }   // 下の画面へのクリックを通さない
+    hfs := FocusScope {
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) { Backend.help-open = false; return EventResult.accept; }
+            return EventResult.reject;
+        }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Text { text: Backend.help-title; font-size: 22px; color: Theme.text; vertical-alignment: center; }
+                Btn { label: "閉じる"; tab-skip: true; clicked => { Backend.help-open = false; } }
+            }
+            TextEdit { vertical-stretch: 1; read-only: true; wrap: word-wrap; font-size: 18px; text: Backend.help-text; }
+        }
+    }
+}
+
 component PreviewScreen inherits Rectangle {
     background: Theme.bg;
     init => { pfs.focus(); }
@@ -1076,7 +1109,10 @@ export component MainWindow inherits Window {
                         else { Backend.settings-open(); root.open-menu = 2; }
                     }
                 }
-                MenuHead { title: "ヘルプ"; }
+                mh4 := MenuHead {
+                    title: "ヘルプ"; open: root.open-menu == 4;
+                    clicked => { root.open-menu = root.open-menu == 4 ? -1 : 4; }
+                }
             }
             Text {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
@@ -1115,6 +1151,11 @@ export component MainWindow inherits Window {
         x: mh0.absolute-position.x; y: 30px;
         items: ["ファイルを開く…", "ファイルを新規作成…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
         picked(i) => { root.open-menu = -1; Backend.menu(0, i); }
+    }
+    if root.open-menu == 4: MenuPanel {
+        x: mh4.absolute-position.x; y: 30px;
+        items: ["FAQ", "取扱説明書", "ライセンス（MIT）"];
+        picked(i) => { root.open-menu = -1; Backend.show-help(i); }
     }
     if root.open-menu == 1: MenuPanel {
         x: mh1.absolute-position.x; y: 30px;
@@ -1167,4 +1208,7 @@ export component MainWindow inherits Window {
 
     // 印刷プレビュー（全体を覆う）
     if Backend.preview-open: PreviewScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+
+    // ヘルプ（全体を覆う）
+    if Backend.help-open: HelpScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
 }

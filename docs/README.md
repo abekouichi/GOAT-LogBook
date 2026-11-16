@@ -8,15 +8,15 @@ Walk版「ログ作成」の仕様を元に、Rust + Slint で作り直したも
 
 ## 配置（実行ファイルと同じフォルダ）
 - `setting.json`（自動生成）、`shigunku_num.json`
-- フォントは Windows・Linux とも、本文・見出しは Noto Sans JP（無ければ Noto Sans CJK JP）、等幅（コールサイン）は Windows が Consolas、Linux が Inconsolata です。PDFには次の順に探して読み込みます
+- フォントは Windows・Linux とも、本文・見出しは Noto Sans JP（無ければ Noto Sans CJK JP）、等幅（コールサイン）は Windows が Consolas、Linux が Inconsolata（無ければ DejaVu Sans Mono、Liberation Mono、Noto Sans Mono、Ubuntu Mono の順）です。PDFには次の順に探して読み込みます
   1. `setting.json` の `font_regular` / `font_bold` / `font_mono` に書いたパス（最優先）
   2. 実行ファイルと同じ場所の `fonts/` フォルダ
   3. システムのフォントフォルダ（Windows: `Windows\Fonts` とユーザーのフォント、Linux: `/usr/share/fonts`、`~/.local/share/fonts` など。サブフォルダも探します）
 - 探すファイル名
   - 本文: `NotoSansJP-Regular.ttf`（可変フォントの `NotoSansJP-VariableFont_wght.ttf`、`NotoSansCJK-Regular.ttc` なども可）
   - 見出し（太字・任意）: `NotoSansJP-Bold.ttf`（無ければ本文と同じ字体）
-  - 等幅（任意）: Windows は `consola.ttf`、Linux は `Inconsolata-Regular.ttf`（可変フォントの `Inconsolata[wdth,wght].ttf` なども可）。無ければ本文と同じ字体
-- 画面のフォントは、標準が `ui/app.slint` の `Metrics.ui-font`（"Noto Sans JP"）、コールサインが OS に合わせた等幅（起動時に `src/main.rs` が Windows は Consolas、Linux は Inconsolata に設定）です
+  - 等幅（任意）: Windows は `consola.ttf`、Linux は `Inconsolata-Regular.ttf`（可変フォントの `Inconsolata[wdth,wght].ttf` なども可）。無ければ `DejaVuSansMono.ttf`、`LiberationMono-Regular.ttf`、`NotoSansMono-Regular.ttf`、`UbuntuMono-R.ttf` の順に探します。どれも無ければ本文と同じ字体（等幅になりません）
+- 画面のフォントは、標準が `ui/app.slint` の `Metrics.ui-font`（"Noto Sans JP"）、コールサインなどが等幅（起動時に `src/main.rs` が、PDFと同じ等幅フォントのファイルからフォント名を読んで設定します。Windows は Consolas、Linux は Inconsolata など）です
 - Noto Sans JP / Noto Sans CJK / Inconsolata は Google Fonts などから入手できます（SIL Open Font License）
 - PDFには TrueType 形式（.ttf）のフォントを推奨します。Noto Sans CJK の .ttc / .otf や Debian系の Inconsolata.otf（CFF形式）は、PDFビューアーによって文字が出ないことがあります
 
@@ -27,6 +27,9 @@ Walk版「ログ作成」の仕様を元に、Rust + Slint で作り直したも
 
 ## PDF出力
 印刷はせず、PDFだけを作ります。「ファイル」→「PDF出力…」で、プレビューと余白の調整ができる画面が開きます。使ったフォントはPDFに埋め込まれます。保存先の選択とPDFの作成は画面とは別に行うので、保存中も画面は止まりません。列の見出しは、列幅を狭めても欠けないようにしています（見出しだけで用紙に収まらないときは、見出しの文字を小さくします）。
+
+## ヘルプ（FAQ・取扱説明書・ライセンス）
+「ヘルプ」メニューから、アプリの中に画面を開いて表示します。文章は、ビルド時にアプリへ埋め込みます（`docs/faq.txt`、`docs/manual.txt`、`LICENSE`）。取扱説明書（Word）を直したときは、`docs/manual.txt` も直してください。`LICENSE` の `<著作権者名>` は、実際の名前に直してください。
 
 ## ファイル構成
 - `ui/app.slint` : 画面（「編集」メニューの切り取り・コピー・貼り付けは、いまカーソルのある入力欄に対して働きます）
