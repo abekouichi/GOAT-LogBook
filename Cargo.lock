@@ -2678,6 +2678,7 @@ name = "logbook"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "encoding_rs",
  "fontdue",
  "printpdf",
  "rfd",

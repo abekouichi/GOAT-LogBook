@@ -8,8 +8,9 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    io::Read,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 slint::include_modules!();
@@ -24,6 +25,22 @@ const FREQS: [&str; 17] = ["1.9MHz", "3.5MHz", "3.8MHz", "7MHz", "10MHz", "14MHz
 const MODES: [&str; 7] = ["CW", "SSB", "AM", "FM", "FT8", "RTTY", "SSTV"];
 const POWERS: [&str; 7] = ["1W", "5W", "10W", "50W", "100W", "200W", "1kW"];
 // {callsign} が呼出符号に置換されます。既存コードのURLがある場合は setting.json の api_url で上書きしてください。
+const NCOL: usize = 19;
+/// 一覧・PDFの項目名（番号＝項目番号。0〜14は従来どおり、15〜18が新しい項目）
+const COL_HEADS: [&str; NCOL] = ["日付", "開始時刻", "終了時刻", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
+                                 "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+/// 既定の表示順（左から）
+const DEF_ORDER: [usize; NCOL] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 14];
+/// 既定の列幅[px]
+const DEF_WIDTHS: [f32; NCOL] = [130.0, 70.0, 70.0, 130.0, 60.0, 60.0, 84.0, 62.0, 68.0, 124.0, 170.0, 170.0, 110.0, 170.0, 240.0, 90.0, 90.0, 110.0, 130.0];
+/// 等幅フォントで表示する項目（日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示・GL・検索GL・距離）
+fn is_mono_col(c: usize) -> bool { matches!(c, 0..=8 | 12 | 13 | 15 | 16 | 17) }
+const PREFS: [&str; 47] = ["北海道", "青森県", "岩手県", "秋田県", "山形県", "宮城県", "福島県", "新潟県", "長野県", "東京都", "神奈川県", "千葉県",
+    "埼玉県", "茨城県", "栃木県", "群馬県", "山梨県", "静岡県", "岐阜県", "愛知県", "三重県", "京都府", "滋賀県", "奈良県", "大阪府", "和歌山県",
+    "兵庫県", "富山県", "福井県", "石川県", "岡山県", "島根県", "山口県", "鳥取県", "広島県", "香川県", "徳島県", "愛媛県", "高知県", "福岡県",
+    "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"];
+const JARL_BASE: &str = "https://www.jarl.org/Japanese/A_Shiryo/A-2_jcc-jcg/";
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) logbook/0.1";
 const DEFAULT_API: &str = "https://www.tele.soumu.go.jp/musen/list?ST=1&DA=1&DC=1&OF=2&OW=AT&MA={callsign}";
 
 // ---------------------------------------------------------------- データ型
@@ -44,6 +61,10 @@ struct Record {
     #[serde(rename = "常置場所", default)] loc: String,
     #[serde(rename = "市郡区ナンバー", default)] num: String,
     #[serde(rename = "一括表示", default)] spec: String,
+    #[serde(rename = "GL", default)] gl: String,
+    #[serde(rename = "検索GL", default)] ngl: String,
+    #[serde(rename = "距離", default)] dist: String,
+    #[serde(rename = "方角", default)] bear: String,
 }
 
 impl From<Entry> for Record {
@@ -54,6 +75,7 @@ impl From<Entry> for Record {
             freq: e.freq.to_string(), mode: e.mode.to_string(), power: e.power.to_string(),
             name: e.name.to_string(), qth: e.qth.to_string(), memo: e.memo.to_string(),
             loc: e.loc.to_string(), num: e.num.to_string(), spec: e.spec.to_string(),
+            gl: e.gl.to_string(), ngl: e.ngl.to_string(), dist: e.dist.to_string(), bear: e.bear.to_string(),
         }
     }
 }
@@ -66,6 +88,7 @@ impl From<&Record> for Entry {
             freq: r.freq.as_str().into(), mode: r.mode.as_str().into(), power: r.power.as_str().into(),
             name: r.name.as_str().into(), qth: r.qth.as_str().into(), memo: r.memo.as_str().into(),
             loc: r.loc.as_str().into(), num: r.num.as_str().into(), spec: r.spec.as_str().into(),
+            gl: r.gl.as_str().into(), ngl: r.ngl.as_str().into(), dist: r.dist.as_str().into(), bear: r.bear.as_str().into(),
         }
     }
 }
@@ -87,14 +110,15 @@ struct Config {
     #[serde(default)] font_mono: Option<String>,
     #[serde(default)] my_call: String,
     #[serde(default)] col_show: Vec<bool>,
-    #[serde(default)] num_file: Option<String>,
+    #[serde(default)] my_gl: String,          // 自局のグリッドロケーター
+    #[serde(default)] col_order: Vec<usize>,  // 一覧・履歴・PDFの表示順（左から）
     #[serde(default = "default_api")] api_url: String,
     #[serde(default)] last: Vec<String>, // 前回の入力：周波数・モード・出力・RST(S)・RST(R)
 }
 fn yes() -> bool { true }
 fn default_api() -> String { DEFAULT_API.to_string() }
 impl Default for Config {
-    fn default() -> Self { Config { last_file: None, use_api: true, sort_asc: true, cols: vec![], cols_ver: 0, dark: false, show_clock: true, show_seconds: true, show_popup: true, margins: vec![], font_regular: None, font_bold: None, font_mono: None, my_call: String::new(), col_show: vec![], num_file: None, api_url: default_api(), last: vec![] } }
+    fn default() -> Self { Config { last_file: None, use_api: true, sort_asc: true, cols: vec![], cols_ver: 0, dark: false, show_clock: true, show_seconds: true, show_popup: true, margins: vec![], font_regular: None, font_bold: None, font_mono: None, my_call: String::new(), col_show: vec![], my_gl: String::new(), col_order: vec![], api_url: default_api(), last: vec![] } }
 }
 
 fn exe_dir() -> PathBuf {
@@ -116,7 +140,7 @@ struct App {
     cfg: Config,
     file: Option<PathBuf>,
     recs: Vec<Record>,
-    num: Arc<HashMap<String, String>>,
+    colw: Rc<VecModel<f32>>, // 一覧・履歴の列幅（画面と共有）
     last: [String; 5], // 0=周波数 1=モード 2=出力 3=RST(S) 4=RST(R)
     editing: Option<usize>,
     orig: Option<Record>,
@@ -124,7 +148,6 @@ struct App {
     hist_asc: bool,
     list_asc: bool,
     query: String,
-    d_num: Option<PathBuf>, // 設定メニューで選んだ（未保存の）市郡区ナンバーのファイル
     doc: Option<Doc>,       // PDF出力画面のデータ
     fonts: Option<Arc<Fonts>>, // PDFに使うフォント（読み込み済み）
 }
@@ -152,22 +175,6 @@ fn persist(s: &App) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("保存エラー: {e}"))
 }
 
-fn load_num(path: &Path) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    if let Some(serde_json::Value::Object(o)) =
-        fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok())
-    {
-        for (k, v) in o {
-            m.insert(k, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
-        }
-    }
-    m
-}
-
-fn num_path(cfg: &Config) -> PathBuf {
-    cfg.num_file.as_ref().map(PathBuf::from).unwrap_or_else(|| exe_dir().join("shigunku_num.json"))
-}
-
 // ---------------------------------------------------------------- 表示用ヘルパ
 fn base(call: &str) -> String { call.split('/').next().unwrap_or("").to_uppercase() }
 
@@ -179,6 +186,7 @@ fn log_row(i: usize, r: &Record) -> LogRow {
         name: r.name.as_str().into(), qth: r.qth.as_str().into(), memo: r.memo.replace('\n', " ").into(),
         memo_full: r.memo.as_str().into(),
         loc: r.loc.as_str().into(), num: r.num.as_str().into(), spec: r.spec.as_str().into(),
+        gl: r.gl.as_str().into(), ngl: r.ngl.as_str().into(), dist: r.dist.as_str().into(), bear: r.bear.as_str().into(),
     }
 }
 
@@ -194,7 +202,7 @@ fn dateish(s: &str) -> bool { s.chars().all(|c| c.is_ascii_digit() || c == '/') 
 /// スペース区切りAND検索。「日付A-」「-日付B」「日付A-日付B」で日付範囲。
 fn hit(r: &Record, q: &str) -> bool {
     let hay = [&r.date, &r.start, &r.end, &r.call, &r.rst_s, &r.rst_r, &r.freq, &r.mode, &r.power,
-               &r.name, &r.qth, &r.memo, &r.loc, &r.num, &r.spec]
+               &r.name, &r.qth, &r.memo, &r.loc, &r.num, &r.spec, &r.gl, &r.ngl, &r.dist, &r.bear]
         .iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ").to_uppercase();
     let dd = digits(&r.date);
     for tok in q.split_whitespace() {
@@ -237,47 +245,64 @@ fn has_input(ui: &MainWindow, last: &[String; 5]) -> bool {
     let f = ui.global::<Form>();
     let (rs, rr) = (f.get_rst_s(), f.get_rst_r());
     let rst_typed = (!rs.is_empty() && rs.as_str() != rst_start(&last[3])) || (!rr.is_empty() && rr.as_str() != rst_start(&last[4]));
-    rst_typed || [f.get_call(), f.get_name(), f.get_qth(), f.get_memo()].iter().any(|v| !v.is_empty())
+    rst_typed || [f.get_call(), f.get_name(), f.get_qth(), f.get_memo(), f.get_gl()].iter().any(|v| !v.is_empty())
 }
 
-/// 一覧・履歴の表示項目（15個）。未設定なら全部表示
-/// 旧形式（12個：メモが最後）は、QTHの後ろに常置場所・市郡区ナンバー・一括表示（表示）を挿入して移行
 /// 印刷の余白[mm]（上・下・左・右）。未設定なら10mm
 fn margins_of(cfg: &Config) -> [i32; 4] {
     if cfg.margins.len() == 4 { [cfg.margins[0], cfg.margins[1], cfg.margins[2], cfg.margins[3]] } else { [10; 4] }
 }
 
+/// リスト・履歴の表示項目（19個）。未設定なら全部表示
+/// 旧形式（15個）は、新しい4項目（GL・検索GL・距離・方角）を表示にして移行。
+/// さらに古い形式（12個：メモが最後）は、QTHの後ろに常置場所・市郡区ナンバー・一括表示（表示）を挿入して移行
 fn col_flags(cfg: &Config) -> Vec<bool> {
     match cfg.col_show.len() {
-        15 => cfg.col_show.clone(),
+        19 => cfg.col_show.clone(),
+        15 => { let mut v = cfg.col_show.clone(); v.extend([true; 4]); v }
         12 => {
             let mut v = cfg.col_show[..11].to_vec();
             v.extend([true; 3]);
             v.push(cfg.col_show[11]);
+            v.extend([true; 4]);
             v
         }
-        _ => vec![true; 15],
+        _ => vec![true; NCOL],
     }
 }
 
-fn set_col_show(ui: &MainWindow, flags: Vec<bool>) {
-    ui.global::<Backend>().set_col_show(ModelRc::new(VecModel::from(flags)));
+/// 一覧・履歴の表示順（項目番号を左から並べたもの）。正しくなければ既定の順
+fn col_order(cfg: &Config) -> Vec<usize> {
+    let o = &cfg.col_order;
+    if is_perm(o) { o.clone() } else { DEF_ORDER.to_vec() }
 }
 
-fn read_cols(ui: &MainWindow) -> Vec<f32> {
-    let c = ui.global::<Cols>();
-    vec![c.get_date(), c.get_t_start(), c.get_t_end(), c.get_call(), c.get_rst_s(), c.get_rst_r(),
-         c.get_freq(), c.get_mode(), c.get_power(), c.get_name(), c.get_qth(),
-         c.get_loc(), c.get_num(), c.get_spec()]
+fn is_perm(o: &[usize]) -> bool {
+    if o.len() != NCOL { return false; }
+    let mut seen = [false; NCOL];
+    for &c in o {
+        if c >= NCOL || seen[c] { return false; }
+        seen[c] = true;
+    }
+    true
 }
 
-fn apply_cols(ui: &MainWindow, v: &[f32]) {
-    if v.len() != 11 && v.len() != 14 { return; } // 11個は旧形式
-    let v: Vec<f32> = v.iter().map(|x| x.max(30.0)).collect();
-    let c = ui.global::<Cols>();
-    c.set_date(v[0]); c.set_t_start(v[1]); c.set_t_end(v[2]); c.set_call(v[3]); c.set_rst_s(v[4]);
-    c.set_rst_r(v[5]); c.set_freq(v[6]); c.set_mode(v[7]); c.set_power(v[8]); c.set_name(v[9]); c.set_qth(v[10]);
-    if v.len() == 14 { c.set_loc(v[11]); c.set_num(v[12]); c.set_spec(v[13]); }
+/// 列幅。保存済みの値（旧形式の11個・14個も可）に、足りない分は既定値を足す
+fn col_widths(cfg: &Config) -> Vec<f32> {
+    let mut w = DEF_WIDTHS.to_vec();
+    let c = &cfg.cols;
+    if c.len() == 11 || c.len() == 14 || c.len() == NCOL {
+        for (i, x) in c.iter().enumerate() { w[i] = x.max(30.0); }
+    }
+    w
+}
+
+/// 表示する項目と順序を画面に反映する
+fn set_cols(ui: &MainWindow, order: &[usize], flags: &[bool]) {
+    let bk = ui.global::<Backend>();
+    bk.set_col_show(ModelRc::new(VecModel::from(flags.to_vec())));
+    let vis: Vec<i32> = order.iter().filter(|&&c| flags[c]).map(|&c| c as i32).collect();
+    bk.set_vis_cols(ModelRc::new(VecModel::from(vis)));
 }
 
 fn bump_focus(ui: &MainWindow) {
@@ -319,6 +344,7 @@ fn missing(r: &Record) -> Vec<&'static str> {
 fn collect_form(ui: &MainWindow) -> Record {
     let mut r: Record = ui.global::<Form>().invoke_get().into();
     r.call = r.call.to_uppercase();
+    r.gl = gl_norm(r.gl.trim());
     r
 }
 
@@ -389,6 +415,7 @@ fn fix_datetime(kind: i32, text: &str, cur: i32) -> (String, i32) {
 
 fn filter(kind: i32, text: &str, cur: i32) -> (String, i32) {
     if kind == 2 || kind == 3 { return fix_datetime(kind, text, cur); }
+    if kind == 5 { return filter_gl(text, cur); }
     let keep = |c: &char| match kind {
         0 => c.is_ascii_alphanumeric() || *c == '/',
         1 => c.is_ascii_digit(),
@@ -412,6 +439,7 @@ fn invalid(r: &Record) -> Vec<&'static str> {
     if !r.end.is_empty() && !full_time(&r.end) { v.push("終了時刻"); }
     if !rst(&r.rst_s) { v.push("RST(S)"); }
     if !rst(&r.rst_r) { v.push("RST(R)"); }
+    if !r.gl.is_empty() && !gl_valid(&r.gl) { v.push("GL"); }
     v
 }
 
@@ -444,6 +472,16 @@ fn step(kind: i32, text: &str, cur: i32, dir: i32) -> (String, i32) {
     }
 }
 
+/// 日付(2)・時刻(3)の ← →：年・月・日／時・分の区切りへカーソルを動かす（区切りの末尾に置く）
+fn seg_move(kind: i32, cur: i32, dir: i32) -> i32 {
+    let ends: &[i32] = if kind == 2 { &[4, 7, 10] } else { &[2, 5] };
+    if dir > 0 {
+        ends.iter().copied().find(|&e| e > cur).unwrap_or(*ends.last().unwrap_or(&cur))
+    } else {
+        ends.iter().rev().copied().find(|&e| e < cur).unwrap_or(ends[0])
+    }
+}
+
 fn options(kind: i32) -> Vec<String> {
     match kind {
         0 => FREQS.iter().map(|f| f.to_string()).collect(),
@@ -458,13 +496,15 @@ fn rst_start(last: &str) -> String {
 }
 
 /// RSTの↑↓：2桁なら1の桁、3桁なら10の桁（S）を 1〜9 の範囲で増減する
-fn rst_step(text: &str, dir: i32) -> String {
+/// RSTの↑↓：選んだ桁（idx＝左端が0）を増減する（最上位は1〜5、ほかは1〜9）
+fn rst_step(text: &str, idx: i32, dir: i32) -> String {
     let n = text.len();
     if n != 2 && n != 3 { return rst_start(text); }
     let mut b = text.as_bytes().to_vec();
-    let i = n - 1 - if n == 3 { 1 } else { 0 };
+    let i = (idx.max(0) as usize).min(n - 1);
     if !b[i].is_ascii_digit() { return text.to_string(); }
-    b[i] = (((b[i] - b'0') as i32 + dir).clamp(1, 9) as u8) + b'0';
+    let max = if i == 0 { 5 } else { 9 }; // 最上位の桁（R）は5まで
+    b[i] = (((b[i] - b'0') as i32 + dir).clamp(1, max) as u8) + b'0';
     String::from_utf8(b).unwrap_or_else(|_| text.to_string())
 }
 
@@ -526,12 +566,339 @@ fn dedup(v: Vec<String>) -> Vec<String> {
     o
 }
 
-/// 戻り値: (常置場所, 市郡区ナンバー, 一括表示)
-fn fetch(tpl: &str, call: &str, num: &HashMap<String, String>, paren: bool) -> Result<(String, String, String), String> {
+// ---------------------------------------------------------------- グリッドロケーター（GL）と距離・方角
+/// GLの先頭部分として正しいか（1〜2文字目: A〜R、3〜4文字目: 数字、5〜6文字目: A〜X。最大6文字）
+fn gl_prefix_ok(b: &[u8]) -> bool {
+    if b.len() > 6 { return false; }
+    b.iter().enumerate().all(|(i, &c)| match i {
+        0 | 1 => (b'A'..=b'R').contains(&c.to_ascii_uppercase()),
+        2 | 3 => c.is_ascii_digit(),
+        _ => (b'A'..=b'X').contains(&c.to_ascii_uppercase()),
+    })
+}
+
+/// 4桁（PM97）または6桁（PM97kk）の正しいGLか
+fn gl_valid(s: &str) -> bool { (s.len() == 4 || s.len() == 6) && gl_prefix_ok(s.as_bytes()) }
+
+/// 大文字小文字をそろえる（1〜2文字目は大文字、5〜6文字目は小文字）
+fn gl_norm(s: &str) -> String {
+    s.chars().enumerate().map(|(i, c)| if i < 2 { c.to_ascii_uppercase() } else if i >= 4 { c.to_ascii_lowercase() } else { c }).collect()
+}
+
+/// GL入力欄の入力制限。正しくない文字は受け付けない
+fn filter_gl(text: &str, cur: i32) -> (String, i32) {
+    let mut out = String::new();
+    for c in text.chars() {
+        if !c.is_ascii_alphanumeric() { continue; }
+        let mut t = out.clone();
+        t.push(c);
+        if gl_prefix_ok(t.as_bytes()) { out = t; }
+    }
+    let out = gl_norm(&out);
+    let removed = text.len().saturating_sub(out.len()) as i32;
+    ((out.clone()), (cur - removed).clamp(0, out.len() as i32))
+}
+
+/// GLのマス目の番号（経度方向, 緯度方向）。prec=4 は 2°×1°、prec=6 は 5′×2.5′ のマス
+fn gl_idx(gl: &str, prec: usize) -> Option<(i64, i64)> {
+    let b: Vec<u8> = gl.bytes().map(|c| c.to_ascii_uppercase()).collect();
+    if !(b.len() == 4 || b.len() == 6) || !gl_prefix_ok(&b) { return None; }
+    let f = |i: usize| (b[i] - b'A') as i64;
+    let d = |i: usize| (b[i] - b'0') as i64;
+    let (lo, la) = (f(0) * 10 + d(2), f(1) * 10 + d(3));
+    if prec == 6 {
+        if b.len() < 6 { return None; }
+        Some((lo * 24 + f(4), la * 24 + f(5)))
+    } else {
+        Some((lo, la))
+    }
+}
+
+/// GLのマス目の中心（緯度, 経度）
+fn gl_center(gl: &str) -> Option<(f64, f64)> {
+    let b: Vec<u8> = gl.bytes().map(|c| c.to_ascii_uppercase()).collect();
+    if !(b.len() == 4 || b.len() == 6) || !gl_prefix_ok(&b) { return None; }
+    let mut lon = -180.0 + 20.0 * (b[0] - b'A') as f64 + 2.0 * (b[2] - b'0') as f64;
+    let mut lat = -90.0 + 10.0 * (b[1] - b'A') as f64 + (b[3] - b'0') as f64;
+    if b.len() == 6 {
+        lon += (b[4] - b'A') as f64 * (5.0 / 60.0) + 2.5 / 60.0;
+        lat += (b[5] - b'A') as f64 * (2.5 / 60.0) + 1.25 / 60.0;
+    } else {
+        lon += 1.0;
+        lat += 0.5;
+    }
+    Some((lat, lon))
+}
+
+/// 緯度・経度から6桁のGLを求める
+fn gl_from_latlon(lat: f64, lon: f64) -> String {
+    let lo = (lon + 180.0).clamp(0.0, 359.999_999);
+    let la = (lat + 90.0).clamp(0.0, 179.999_999);
+    let f1 = (lo / 20.0).floor();
+    let r = lo - f1 * 20.0;
+    let s1 = (r / 2.0).floor();
+    let u1 = ((r - s1 * 2.0) * 12.0).floor().min(23.0);
+    let f2 = (la / 10.0).floor();
+    let r = la - f2 * 10.0;
+    let s2 = r.floor();
+    let u2 = ((r - s2) * 24.0).floor().min(23.0);
+    format!("{}{}{}{}{}{}", (b'A' + f1 as u8) as char, (b'A' + f2 as u8) as char, s1 as u8, s2 as u8,
+            (b'a' + u1 as u8) as char, (b'a' + u2 as u8) as char)
+}
+
+/// 2点間の距離[km]と、1点目から見た2点目の方位[度]（大圏）
+fn dist_bear(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let (p1, p2) = (a.0.to_radians(), b.0.to_radians());
+    let dl = (b.1 - a.1).to_radians();
+    let h = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    let d = 2.0 * 6371.0 * h.sqrt().min(1.0).asin();
+    let y = dl.sin() * p2.cos();
+    let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dl.cos();
+    (d, y.atan2(x).to_degrees().rem_euclid(360.0))
+}
+
+fn compass16(deg: f64) -> &'static str {
+    const N: [&str; 16] = ["北", "北北東", "北東", "東北東", "東", "東南東", "南東", "南南東",
+                           "南", "南南西", "南西", "西南西", "西", "西北西", "北西", "北北西"];
+    N[(((deg + 11.25) / 22.5).floor() as usize) % 16]
+}
+
+fn calc_dist_opt(my: &str, gl: &str, ngl: &str) -> Option<(String, String)> {
+    let my = my.trim();
+    if !gl_valid(my) { return None; }
+    let gl = gl.trim();
+    let ngl = ngl.trim();
+    // 入力したGLを優先。なければ、ネットで調べた相手局のGL（かっこつきは、移動運用などで不確か）
+    let (other, uncertain) = if gl_valid(gl) {
+        (gl.to_string(), false)
+    } else {
+        let paren = ngl.starts_with('(');
+        let n = ngl.trim_matches(|c: char| c == '(' || c == ')');
+        if gl_valid(n) { (n.to_string(), paren) } else { return None; }
+    };
+    // 比べるマスの大きさ：両方6桁なら6桁、どちらかが4桁なら4桁
+    let prec = if my.len() >= 6 && other.len() >= 6 { 6 } else { 4 };
+    let (a, b) = (gl_idx(my, prec)?, gl_idx(&other, prec)?);
+    let n: i64 = if prec == 6 { 4320 } else { 180 };
+    let dx = (a.0 - b.0).abs();
+    let ring = dx.min(n - dx).max((a.1 - b.1).abs()); // 0=同じマス 1=隣接（8マス） 2=その外側（16マス）
+    if ring == 0 { return Some(("-".into(), "-".into())); }
+    let (d, br) = dist_bear(gl_center(my)?, gl_center(&other)?);
+    let ds = format!("{} km", d.round() as i64);
+    let bs = format!("{} {}°", compass16(br), (br.round() as i64) % 360);
+    if ring <= 2 || uncertain { Some((format!("({ds})"), format!("({bs})"))) } else { Some((ds, bs)) }
+}
+
+/// 自局のGL・入力したGL・ネットで調べたGLから、(距離, 方角) の表示を作る
+fn calc_dist(my: &str, gl: &str, ngl: &str) -> (String, String) {
+    calc_dist_opt(my, gl, ngl).unwrap_or_default()
+}
+
+/// 入力画面の距離・方角を、いまの入力値から計算し直す
+fn refresh_dist(ui: &MainWindow) {
+    let (bk, f) = (ui.global::<Backend>(), ui.global::<Form>());
+    let (d, b) = calc_dist(bk.get_my_gl().as_str(), f.get_gl().as_str(), f.get_ngl().as_str());
+    f.set_dist(d.into());
+    f.set_bear(b.into());
+}
+
+// ---------------------------------------------------------------- JARL 市郡区ナンバー（ネットから取得）
+/// JARLのJCC（市）・JCG（郡）・区番号のリスト。ファイルは使わず、最初の検索のときにネットから読み込む
+#[derive(Default)]
+struct JccDb {
+    cities: Vec<(usize, String, String, bool)>, // (都道府県番号, 市名, 番号, 東京都の特別区か)
+    kus: HashMap<(String, String), String>,     // (市の番号, 区名) → 区番号
+    guns: Vec<(usize, String, String, bool)>,   // (都道府県番号, 郡名, 番号, 括弧つき（北海道で同名の郡がある）か)
+    towns: HashMap<(usize, String), String>,    // (都道府県番号, 町村名) → 郡番号（リストに町村が載っている郡）
+}
+
+fn nk(c: char) -> char { match c { 'ヶ' | 'ヵ' => 'ケ', _ => c } }
+fn nstr(s: &str) -> String { s.chars().filter(|c| !c.is_whitespace()).map(nk).collect() }
+fn all_digits(s: &str) -> bool { !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) }
+
+/// JCCリスト：「  0802   Nagaoka   長岡」の形。「*」つきは消滅した市なので除く
+fn parse_jcc(text: &str, db: &mut JccDb) {
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('*') || t.contains('※') { continue; }
+        let tok: Vec<&str> = t.split_whitespace().collect();
+        if tok.len() < 3 || !all_digits(tok[0]) || !(tok[0].len() == 4 || tok[0].len() == 6) { continue; }
+        let Ok(pref) = tok[0][..2].parse::<usize>() else { continue };
+        db.cities.push((pref, nstr(tok[2]), tok[0].to_string(), tok[0].len() == 6));
+    }
+}
+
+/// JCGリスト：「  08001   Iwafune   岩船」の形。北海道などは、続く行に町村名が載っている
+fn parse_jcg(text: &str, db: &mut JccDb) {
+    let mut cur: Option<(usize, String)> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if t.starts_with('*') { cur = None; continue; }
+        let tok: Vec<&str> = t.split_whitespace().collect();
+        if all_digits(tok[0]) && tok[0].len() == 5 && tok.len() >= 3 {
+            let Ok(pref) = tok[0][..2].parse::<usize>() else { continue };
+            let kanji = tok[2];
+            let paren = kanji.contains('(') || kanji.contains('（');
+            let name = nstr(kanji.split(|c: char| c == '(' || c == '（').next().unwrap_or(""));
+            db.guns.push((pref, name, tok[0].to_string(), paren));
+            cur = Some((pref, tok[0].to_string()));
+        } else if let Some((pref, no)) = &cur {
+            if tok.len() >= 2 {
+                let last = tok[tok.len() - 1];
+                if !last.is_ascii() { db.towns.insert((*pref, nstr(last)), no.clone()); }
+            }
+        }
+    }
+}
+
+/// 区リスト：「札幌市(0101)」の行のあとに「010101  Chuo  中央」が続く。「※」つきは消滅した区
+fn parse_ku(text: &str, db: &mut JccDb) {
+    let mut city: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        if let Some(p) = t.find(|c: char| c == '(' || c == '（') {
+            if t[..p].ends_with('市') {
+                let d: String = t[p..].chars().filter(|c| c.is_ascii_digit()).collect();
+                city = if d.is_empty() { None } else { Some(d) };
+                continue;
+            }
+        }
+        if t.contains('※') { continue; }
+        let tok: Vec<&str> = t.split_whitespace().collect();
+        if let Some(c) = &city {
+            if tok.len() >= 3 && all_digits(tok[0]) && tok[0].len() == 6 {
+                db.kus.insert((c.clone(), nstr(tok[2])), tok[0].to_string());
+            }
+        }
+    }
+}
+
+fn decode_text(b: &[u8]) -> String {
+    let s = match std::str::from_utf8(b) {
+        Ok(s) => s.to_string(),
+        Err(_) => encoding_rs::SHIFT_JIS.decode(b).0.into_owned(), // JARLのファイルがShift_JISのときのため
+    };
+    s.trim_start_matches('\u{feff}').to_string()
+}
+
+fn http_text(url: &str) -> Result<String, String> {
+    let resp = ureq::get(url).set("User-Agent", UA).timeout(std::time::Duration::from_secs(15)).call()
+        .map_err(|e| match e {
+            ureq::Error::Status(c, _) => format!("HTTP {c}: {url}"),
+            other => format!("通信エラー: {other}"),
+        })?;
+    let mut buf = Vec::new();
+    resp.into_reader().take(8_000_000).read_to_end(&mut buf).map_err(|e| format!("取得エラー: {e}"))?;
+    Ok(decode_text(&buf))
+}
+
+fn load_jcc_db() -> Result<JccDb, String> {
+    let mut db = JccDb::default();
+    parse_jcc(&http_text(&format!("{JARL_BASE}jcc-list.txt")).map_err(|e| format!("JARL市番号リスト: {e}"))?, &mut db);
+    parse_jcg(&http_text(&format!("{JARL_BASE}jcg-list.txt")).map_err(|e| format!("JARL郡番号リスト: {e}"))?, &mut db);
+    parse_ku(&http_text(&format!("{JARL_BASE}ku-list.txt")).map_err(|e| format!("JARL区番号リスト: {e}"))?, &mut db);
+    if db.cities.is_empty() { return Err("JARL市番号リストを読み取れませんでした".into()); }
+    Ok(db)
+}
+
+static JCC_DB: Mutex<Option<Arc<JccDb>>> = Mutex::new(None);
+
+/// JARLのリストを、最初に必要になったときに1回だけ読み込む（失敗したら次の検索でもう一度）
+fn jcc_db() -> Result<Arc<JccDb>, String> {
+    let mut g = JCC_DB.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(d) = g.as_ref() { return Ok(d.clone()); }
+    let d = Arc::new(load_jcc_db()?);
+    *g = Some(d.clone());
+    Ok(d)
+}
+
+/// 常置場所（例「新潟県長岡市」「新潟県新潟市中央区」「新潟県北蒲原郡聖籠町」）から、
+/// (市郡区ナンバー, 市区町村までの住所) を求める。政令指定都市は区ナンバー
+fn resolve(db: &JccDb, loc: &str) -> Option<(String, String)> {
+    let orig: Vec<char> = loc.trim().chars().collect();
+    let norm: String = orig.iter().map(|&c| nk(c)).collect();
+    let (pi, pname) = PREFS.iter().enumerate().find(|(_, p)| norm.starts_with(**p))?;
+    let pref = pi + 1;
+    let plen = pname.chars().count();
+    let rest: String = norm.chars().skip(plen).collect();
+    let rc: Vec<char> = rest.chars().collect();
+    let mk = |n: usize| -> String { orig.iter().take(plen + n).collect() };
+    let nlen = |s: &str| s.chars().count();
+
+    // 市（名前がいちばん長く合うもの）
+    let mut best: Option<&(usize, String, String, bool)> = None;
+    for c in db.cities.iter().filter(|c| c.0 == pref && !c.3) {
+        if rest.starts_with(&format!("{}市", c.1)) && best.map_or(true, |b| nlen(&c.1) > nlen(&b.1)) { best = Some(c); }
+    }
+    if let Some(c) = best {
+        let n = nlen(&c.1) + 1;
+        let tail: Vec<char> = rc.iter().skip(n).copied().collect();
+        if let Some(k) = tail.iter().take(6).position(|&ch| ch == '区') {
+            let ku: String = tail[..k].iter().collect();
+            if let Some(num) = db.kus.get(&(c.2.clone(), ku)) { return Some((num.clone(), mk(n + k + 1))); }
+        }
+        return Some((c.2.clone(), mk(n)));
+    }
+    // 東京都の特別区
+    if pref == 10 {
+        let mut w: Option<&(usize, String, String, bool)> = None;
+        for c in db.cities.iter().filter(|c| c.0 == pref && c.3) {
+            if rest.starts_with(&format!("{}区", c.1)) && w.map_or(true, |b| nlen(&c.1) > nlen(&b.1)) { w = Some(c); }
+        }
+        if let Some(c) = w { return Some((c.2.clone(), mk(nlen(&c.1) + 1))); }
+    }
+    // 郡＋町村
+    if let Some(g) = rc.iter().position(|&ch| ch == '郡') {
+        if g >= 1 {
+            let gun: String = rc[..g].iter().collect();
+            let after = &rc[g + 1..];
+            let t = after.iter().position(|&ch| ch == '町' || ch == '村');
+            let n = t.map(|t| g + 1 + t + 1).unwrap_or(g + 1);
+            if let Some(t) = t {
+                let town: String = after[..=t].iter().collect();
+                if let Some(num) = db.towns.get(&(pref, town)) { return Some((num.clone(), mk(n))); }
+            }
+            if let Some(x) = db.guns.iter().find(|x| x.0 == pref && x.1 == gun && !x.3) { return Some((x.2.clone(), mk(n))); }
+        }
+    }
+    // 郡のない町村（東京都の島など）
+    if let Some(t) = rc.iter().position(|&ch| ch == '町' || ch == '村') {
+        let town: String = rc[..=t].iter().collect();
+        if let Some(num) = db.towns.get(&(pref, town)) { return Some((num.clone(), mk(t + 1))); }
+    }
+    None
+}
+
+/// 国土地理院の住所検索で、市区町村の位置を調べ、6桁のGLにする
+fn geocode_gl(q: &str) -> Result<String, String> {
+    let body = ureq::get("https://msearch.gsi.go.jp/address-search/AddressSearch")
+        .query("q", q).set("User-Agent", UA).timeout(std::time::Duration::from_secs(10)).call()
+        .map_err(|e| match e {
+            ureq::Error::Status(c, _) => format!("HTTP {c}"),
+            other => format!("通信エラー: {other}"),
+        })?
+        .into_string().map_err(|e| format!("取得エラー: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("解析エラー: {e}"))?;
+    let arr = v.as_array().ok_or("住所が見つかりません")?;
+    let pick = arr.iter().find(|f| f["properties"]["title"].as_str() == Some(q)).or_else(|| arr.first()).ok_or("住所が見つかりません")?;
+    let c = pick["geometry"]["coordinates"].as_array().ok_or("位置を読み取れません")?;
+    let (lon, lat) = (c.get(0).and_then(|x| x.as_f64()), c.get(1).and_then(|x| x.as_f64()));
+    match (lat, lon) {
+        (Some(la), Some(lo)) => Ok(gl_from_latlon(la, lo)),
+        _ => Err("位置を読み取れません".into()),
+    }
+}
+
+/// 総務省APIと、JARL・国土地理院から取得した結果
+struct Found { loc: String, num: String, spec: String, gl: String, warn: Option<String> }
+
+fn fetch(tpl: &str, call: &str, paren: bool) -> Result<Found, String> {
     let mut url = tpl.replace("{callsign}", &base(call));
     if !url.contains("SC=") { url.push_str("&SC=1"); } // スタートカウント必須（保存済みの旧URLにも対応）
     let body = ureq::get(&url)
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) logbook/0.1")
+        .set("User-Agent", UA)
         .timeout(std::time::Duration::from_secs(10)).call()
         .map_err(|e| match e {
             ureq::Error::Status(c, r) => format!("HTTP {c}: {}", r.into_string().unwrap_or_default().chars().take(100).collect::<String>()),
@@ -558,25 +925,54 @@ fn fetch(tpl: &str, call: &str, num: &HashMap<String, String>, paren: bool) -> R
     let (locs, specs) = (dedup(locs), dedup(specs));
     if locs.is_empty() && specs.is_empty() {
         let nf = "Not found".to_string();
-        return Ok((nf.clone(), nf.clone(), nf));
+        return Ok(Found { loc: nf.clone(), num: nf.clone(), spec: nf, gl: String::new(), warn: None });
     }
-    let nums = dedup(locs.iter().map(|l| num.get(l).cloned().unwrap_or_else(|| "Not found".into())).collect());
+    // 市郡区ナンバー：JARLのリストをネットから読み込んで調べる
+    let mut warns: Vec<String> = vec![];
+    let db = jcc_db();
+    let mut nums: Vec<String> = vec![];
+    let mut munis: Vec<String> = vec![];
+    match &db {
+        Ok(d) => for l in &locs {
+            match resolve(d, l) {
+                Some((n, m)) => { nums.push(n); munis.push(m); }
+                None => nums.push("Not found".into()),
+            }
+        },
+        Err(e) => { nums.push("取得エラー".into()); warns.push(e.clone()); }
+    }
+    let nums = dedup(nums);
+    // 相手局のGL：市区町村の位置を、国土地理院の住所検索でネットから調べる
+    let mut gl = String::new();
+    let q = munis.first().cloned().or_else(|| locs.first().cloned()).unwrap_or_default();
+    if !q.is_empty() {
+        match geocode_gl(&q) {
+            Ok(g) => gl = if paren { format!("({g})") } else { g },
+            Err(e) => warns.push(format!("GL取得エラー: {e}")),
+        }
+    }
     let wrap = |s: String| if paren { format!("({s})") } else { s };
-    Ok((wrap(locs.join(",")), wrap(nums.join(",")), specs.join(",")))
+    Ok(Found { loc: wrap(locs.join(",")), num: wrap(nums.join(",")), spec: specs.join(","), gl,
+               warn: if warns.is_empty() { None } else { Some(warns.join(" / ")) } })
 }
 
-fn start_lookup(ui: &MainWindow, tpl: String, call: String, num: Arc<HashMap<String, String>>) {
+fn start_lookup(ui: &MainWindow, tpl: String, call: String) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let res = fetch(&tpl, &call, &num, call.contains('/'));
+        let res = fetch(&tpl, &call, call.contains('/'));
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 let f = ui.global::<Form>();
                 if f.get_call().as_str() != call { return; } // 入力が変わっていたら捨てる
                 match res {
-                    Ok((l, n, s)) => f.invoke_set_info(l.into(), n.into(), s.into()),
+                    Ok(r) => {
+                        f.invoke_set_info(r.loc.into(), r.num.into(), r.spec.into(), r.gl.into());
+                        refresh_dist(&ui);
+                        if let Some(w) = r.warn { status(&ui, &w); }
+                    }
                     Err(e) => {
-                        f.invoke_set_info("取得エラー".into(), "".into(), "".into());
+                        f.invoke_set_info("取得エラー".into(), "".into(), "".into(), "".into());
+                        refresh_dist(&ui);
                         status(&ui, &e);
                     }
                 }
@@ -596,16 +992,16 @@ fn build_job(s: &App) -> Result<PrintJob, String> {
     let idx = sorted(&s.recs, idx, s.list_asc);
     if idx.is_empty() { return Err("PDFにするデータがありません".into()); }
     let flags = col_flags(&s.cfg);
-    let heads = ["日付", "開始時刻", "終了時刻", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
-                 "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ"];
-    let cols: Vec<usize> = (0..15).filter(|&c| flags[c]).collect();
+    let heads = COL_HEADS;
+    let cols: Vec<usize> = col_order(&s.cfg).into_iter().filter(|&c| flags[c]).collect(); // 設定した表示順（左から）
     if cols.is_empty() { return Err("表示する項目がありません。設定で表示項目を選んでください".into()); }
     let cell = |r: &Record, c: usize| -> String {
         match c {
             0 => r.date.clone(), 1 => r.start.clone(), 2 => r.end.clone(), 3 => r.call.clone(),
             4 => r.rst_s.clone(), 5 => r.rst_r.clone(), 6 => r.freq.clone(), 7 => r.mode.clone(),
             8 => r.power.clone(), 9 => r.name.clone(), 10 => r.qth.clone(), 11 => r.loc.clone(),
-            12 => r.num.clone(), 13 => r.spec.clone(), _ => r.memo.clone(),
+            12 => r.num.clone(), 13 => r.spec.clone(), 14 => r.memo.clone(),
+            15 => r.gl.clone(), 16 => r.ngl.clone(), 17 => r.dist.clone(), _ => r.bear.clone(),
         }
     };
     let hv: Vec<String> = cols.iter().map(|&c| heads[c].to_string()).collect();
@@ -617,7 +1013,7 @@ fn build_job(s: &App) -> Result<PrintJob, String> {
     let mut info = format!("出力日時: {}　／　{}件", Local::now().format("%Y/%m/%d %H:%M"), rows.len());
     if !s.cfg.my_call.is_empty() { info = format!("{}　／　{}", s.cfg.my_call, info); }
     if !s.query.is_empty() { info.push_str(&format!("　／　検索: {}", s.query)); }
-    let mono: Vec<bool> = cols.iter().map(|&c| matches!(c, 0..=8 | 12 | 13)).collect(); // 日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示は等幅（Windows: Consolas / Linux: Inconsolata、無ければ DejaVu Sans Mono など）
+    let mono: Vec<bool> = cols.iter().map(|&c| is_mono_col(c)).collect(); // 日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示・GL・検索GL・距離は等幅（Windows: Consolas / Linux: Inconsolata、無ければ DejaVu Sans Mono など）
     Ok(PrintJob { title, info, heads: hv, rows, mono, margins: margins_of(&s.cfg) })
 }
 
@@ -1117,13 +1513,21 @@ fn main() -> Result<(), slint::PlatformError> {
         cfg.cols_ver = 2;
         cfg.save();
     }
-    let num = Arc::new(load_num(&num_path(&cfg)));
+    // 等幅フォントの文字を1.1倍にしたので、等幅の項目の列幅も1.1倍にする（1回だけ）
+    if cfg.cols_ver < 3 {
+        for (i, x) in cfg.cols.iter_mut().enumerate() {
+            if is_mono_col(i) { *x *= 1.1; }
+        }
+        cfg.cols_ver = 3;
+        cfg.save();
+    }
+    let colw = Rc::new(VecModel::from(col_widths(&cfg)));
     let asc = cfg.sort_asc;
     let mut last: [String; 5] = Default::default();
     for (i, v) in cfg.last.iter().take(5).enumerate() { last[i] = v.clone(); }
     let app: Shared = Rc::new(RefCell::new(App {
-        cfg, file: None, recs: vec![], num, last, editing: None, orig: None,
-        hist_call: String::new(), hist_asc: asc, list_asc: asc, query: String::new(), d_num: None, doc: None, fonts: None,
+        cfg, file: None, recs: vec![], colw: colw.clone(), last, editing: None, orig: None,
+        hist_call: String::new(), hist_asc: asc, list_asc: asc, query: String::new(), doc: None, fonts: None,
     }));
 
     let bk = ui.global::<Backend>();
@@ -1138,8 +1542,12 @@ fn main() -> Result<(), slint::PlatformError> {
     bk.set_show_seconds(app.borrow().cfg.show_seconds);
     bk.set_show_popup(app.borrow().cfg.show_popup);
     bk.set_my_call(app.borrow().cfg.my_call.as_str().into());
-    apply_cols(&ui, &app.borrow().cfg.cols);
-    set_col_show(&ui, col_flags(&app.borrow().cfg));
+    bk.set_my_gl(app.borrow().cfg.my_gl.as_str().into());
+    bk.set_col_w(ModelRc::from(colw.clone()));
+    {
+        let s = app.borrow();
+        set_cols(&ui, &col_order(&s.cfg), &col_flags(&s.cfg));
+    }
 
     // 純粋な補助コールバック
     bk.on_now(|k| {
@@ -1155,7 +1563,16 @@ fn main() -> Result<(), slint::PlatformError> {
           let k = (k as usize).min(4);
           a.try_borrow().map(|s| if k >= 3 { rst_start(&s.last[k]) } else { s.last[k].clone() }).unwrap_or_default().into()
       }); }
-    bk.on_rst_step(|t, d| rst_step(&t, d).into());
+    bk.on_rst_step(|t, i, d| rst_step(&t, i, d).into());
+    bk.on_seg(|k, c, d| seg_move(k, c, d));
+    bk.on_calc(|my, gl, ngl| { let (d, b) = calc_dist(&my, &gl, &ngl); Dist { dist: d.into(), bear: b.into() } });
+    { let a = app.clone();
+      bk.on_resize(move |c, w| {
+          if let Ok(s) = a.try_borrow() {
+              let c = c as usize;
+              if c < NCOL { s.colw.set_row_data(c, w.max(30.0)); }
+          }
+      }); }
 
     // 画面遷移
     { let (w, a) = (ui.as_weak(), app.clone());
@@ -1185,15 +1602,28 @@ fn main() -> Result<(), slint::PlatformError> {
     // 設定メニュー：開くとき、現在の設定を編集用の値にコピーする
     { let (w, a) = (ui.as_weak(), app.clone());
       bk.on_settings_open(move || {
-          let ui = w.unwrap(); let mut s = a.borrow_mut(); let bk = ui.global::<Backend>();
+          let ui = w.unwrap(); let s = a.borrow(); let bk = ui.global::<Backend>();
           bk.set_d_use_api(s.cfg.use_api);
           bk.set_d_dark(s.cfg.dark);
           bk.set_d_clock(s.cfg.show_clock);
           bk.set_d_sec(s.cfg.show_seconds);
           bk.set_d_popup(s.cfg.show_popup);
           bk.set_d_call(s.cfg.my_call.as_str().into());
+          bk.set_d_gl(s.cfg.my_gl.as_str().into());
           bk.set_d_col_show(ModelRc::new(VecModel::from(col_flags(&s.cfg))));
-          s.d_num = None;
+          let order: Vec<i32> = col_order(&s.cfg).into_iter().map(|c| c as i32).collect();
+          bk.set_d_col_order(ModelRc::new(VecModel::from(order)));
+      }); }
+
+    // 設定メニュー「表示項目と順序」：▲▼で表示順を入れ替える
+    { let w = ui.as_weak();
+      bk.on_col_move(move |pos, dir| {
+          let ui = w.unwrap(); let bk = ui.global::<Backend>();
+          let mut o: Vec<i32> = bk.get_d_col_order().iter().collect();
+          let (p, q) = (pos as isize, pos as isize + dir as isize);
+          if p < 0 || q < 0 || p as usize >= o.len() || q as usize >= o.len() { return; }
+          o.swap(p as usize, q as usize);
+          bk.set_d_col_order(ModelRc::new(VecModel::from(o)));
       }); }
 
     // 設定メニュー「保存」：編集用の値を反映して保存する（「キャンセル」は何もしない）
@@ -1212,16 +1642,25 @@ fn main() -> Result<(), slint::PlatformError> {
           bk.set_show_popup(s.cfg.show_popup);
           s.cfg.my_call = bk.get_d_call().to_uppercase();
           bk.set_my_call(s.cfg.my_call.as_str().into());
-          let f: Vec<bool> = bk.get_d_col_show().iter().collect();
-          if f.len() == 15 {
-              s.cfg.col_show = f.clone();
-              set_col_show(&ui, f);
+          // 自局のGL（4桁または6桁。空なら距離・方角は出さない）
+          let g = gl_norm(bk.get_d_gl().trim());
+          let mut msg = String::new();
+          if g.is_empty() || gl_valid(&g) {
+              s.cfg.my_gl = g;
+              bk.set_my_gl(s.cfg.my_gl.as_str().into());
+              refresh_dist(&ui);
+          } else {
+              msg = "自局のGLの形式が正しくないので、GLは保存しませんでした（例: PM97 または PM97kk）".into();
           }
-          if let Some(p) = s.d_num.take() {
-              s.num = Arc::new(load_num(&p));
-              s.cfg.num_file = Some(p.to_string_lossy().to_string());
+          let f: Vec<bool> = bk.get_d_col_show().iter().collect();
+          let o: Vec<usize> = bk.get_d_col_order().iter().map(|c| c.max(0) as usize).collect();
+          if f.len() == NCOL && is_perm(&o) {
+              s.cfg.col_show = f.clone();
+              s.cfg.col_order = o.clone();
+              set_cols(&ui, &o, &f);
           }
           s.cfg.save();
+          status(&ui, &msg);
       }); }
 
     // 印刷プレビュー：ページ移動／印刷
@@ -1311,11 +1750,11 @@ fn main() -> Result<(), slint::PlatformError> {
       }); }
 
     // 列幅の保存（ドラッグ終了時）
-    { let (w, a) = (ui.as_weak(), app.clone());
+    { let a = app.clone();
       bk.on_cols_changed(move || {
-          let ui = w.unwrap(); let mut s = a.borrow_mut();
-          s.cfg.cols = read_cols(&ui);
-          s.cfg.cols_ver = 2;
+          let mut s = a.borrow_mut();
+          s.cfg.cols = s.colw.iter().collect();
+          s.cfg.cols_ver = 3;
           s.cfg.save();
       }); }
 
@@ -1340,6 +1779,26 @@ fn main() -> Result<(), slint::PlatformError> {
                   }
               }
               (0, 2) => {
+                  // 名前を付けて保存：いまの記録を別のファイルに書き出し、以後はそのファイルを使う
+                  let mut s = a.borrow_mut();
+                  let name = s.file.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string())
+                      .unwrap_or_else(|| "log.logbook".to_string());
+                  if let Some(mut p) = rfd::FileDialog::new().add_filter("logbook", &["logbook"]).set_file_name(name.as_str()).save_file() {
+                      if p.extension().is_none() { p.set_extension("logbook"); }
+                      let old = s.file.replace(p.clone());
+                      match persist(&s) {
+                          Ok(()) => {
+                              s.cfg.last_file = Some(p.to_string_lossy().to_string());
+                              s.cfg.save();
+                              let fname = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                              ui.global::<Backend>().set_file_name(fname.into());
+                              status(&ui, "");
+                          }
+                          Err(e) => { s.file = old; status(&ui, &e); }
+                      }
+                  }
+              }
+              (0, 3) => {
                   let mut s = a.borrow_mut();
                   s.file = None; s.recs.clear(); s.editing = None; s.orig = None; s.hist_call.clear();
                   s.cfg.last_file = None; s.cfg.save();
@@ -1350,25 +1809,20 @@ fn main() -> Result<(), slint::PlatformError> {
                   bk.set_screen(1);
                   refresh_list(&ui, &s); refresh_hist(&ui, &s);
               }
-              (0, 3) => {
+              (0, 4) => {
                   let mut s = a.borrow_mut();
                   match open_pdf_screen(&ui, &mut s) { Ok(()) => status(&ui, ""), Err(e) => status(&ui, &e) }
               }
-              (0, 5) => { let _ = slint::quit_event_loop(); }
+              (0, 6) => { let _ = slint::quit_event_loop(); }
               (2, 0) | (2, 1) => { ui.global::<Backend>().set_d_use_api(i == 0); }
-              (2, 3) => {
-                  if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                      a.borrow_mut().d_num = Some(p);
-                  }
-              }
-              (2, 6) => { let bk = ui.global::<Backend>(); bk.set_d_dark(!bk.get_d_dark()); }
-              (2, 7) => { let bk = ui.global::<Backend>(); bk.set_d_clock(!bk.get_d_clock()); }
-              (2, 8) => { let bk = ui.global::<Backend>(); bk.set_d_sec(!bk.get_d_sec()); }
-              (2, 9) => { let bk = ui.global::<Backend>(); bk.set_d_popup(!bk.get_d_popup()); }
-              (3, i) if (0..15).contains(&i) => {
+              (2, 5) => { let bk = ui.global::<Backend>(); bk.set_d_dark(!bk.get_d_dark()); }
+              (2, 6) => { let bk = ui.global::<Backend>(); bk.set_d_clock(!bk.get_d_clock()); }
+              (2, 7) => { let bk = ui.global::<Backend>(); bk.set_d_sec(!bk.get_d_sec()); }
+              (2, 8) => { let bk = ui.global::<Backend>(); bk.set_d_popup(!bk.get_d_popup()); }
+              (3, i) if (0..NCOL as i32).contains(&i) => {
                   let bk = ui.global::<Backend>();
                   let mut f: Vec<bool> = bk.get_d_col_show().iter().collect();
-                  if f.len() == 15 {
+                  if f.len() == NCOL {
                       f[i as usize] = !f[i as usize];
                       bk.set_d_col_show(ModelRc::new(VecModel::from(f)));
                   }
@@ -1385,7 +1839,7 @@ fn main() -> Result<(), slint::PlatformError> {
           let ui = w.unwrap(); let mut s = a.borrow_mut();
           s.hist_call = call.clone();
           refresh_hist(&ui, &s);
-          if s.cfg.use_api { start_lookup(&ui, s.cfg.api_url.clone(), call, s.num.clone()); }
+          if s.cfg.use_api { start_lookup(&ui, s.cfg.api_url.clone(), call); }
       }); }
 
     // 保存（入力画面）

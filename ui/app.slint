@@ -1,15 +1,16 @@
 import { ListView, TextEdit, Palette, SpinBox } from "std-widgets.slint";
 
 export struct Edit { text: string, cursor: int }
+export struct Dist { dist: string, bear: string }
 export struct Entry {
     date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
     freq: string, mode: string, power: string, name: string, qth: string, memo: string,
-    loc: string, num: string, spec: string,
+    loc: string, num: string, spec: string, gl: string, ngl: string, dist: string, bear: string,
 }
 export struct LogRow {
     id: int, date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
     freq: string, mode: string, power: string, name: string, qth: string, memo: string, memo-full: string,
-    loc: string, num: string, spec: string,
+    loc: string, num: string, spec: string, gl: string, ngl: string, dist: string, bear: string,
 }
 
 export global Form {
@@ -28,21 +29,25 @@ export global Form {
     in-out property <string> loc;
     in-out property <string> num;
     in-out property <string> spec;
+    in-out property <string> gl;     // 入力した相手局のGL
+    in-out property <string> ngl;    // ネットで調べた相手局のGL
+    in-out property <string> dist;   // 自局との距離
+    in-out property <string> bear;   // 自局から見た方角
     public function get() -> Entry {
         return { date: date, t-start: t-start, t-end: t-end, call: call, rst-s: rst-s, rst-r: rst-r,
                  freq: freq, mode: mode, power: power, name: name, qth: qth, memo: memo,
-                 loc: loc, num: num, spec: spec };
+                 loc: loc, num: num, spec: spec, gl: gl, ngl: ngl, dist: dist, bear: bear };
     }
     public function put(e: Entry) {
         date = e.date; t-start = e.t-start; t-end = e.t-end; call = e.call; rst-s = e.rst-s; rst-r = e.rst-r;
         freq = e.freq; mode = e.mode; power = e.power; name = e.name; qth = e.qth; memo = e.memo;
-        loc = e.loc; num = e.num; spec = e.spec;
+        loc = e.loc; num = e.num; spec = e.spec; gl = e.gl; ngl = e.ngl; dist = e.dist; bear = e.bear;
     }
-    public function set-info(l: string, n: string, s: string) { loc = l; num = n; spec = s; }
+    public function set-info(l: string, n: string, s: string, g: string) { loc = l; num = n; spec = s; ngl = g; }
     public function clear() {
         date = ""; t-start = ""; t-end = ""; call = ""; rst-s = ""; rst-r = "";
         freq = ""; mode = ""; power = ""; name = ""; qth = ""; memo = "";
-        loc = ""; num = ""; spec = "";
+        loc = ""; num = ""; spec = ""; gl = ""; ngl = ""; dist = ""; bear = "";
     }
 }
 
@@ -55,6 +60,7 @@ export global Backend {
     in-out property <string> file-name;
     in-out property <string> query;
     in-out property <string> my-call;
+    in-out property <string> my-gl;         // 自局のグリッドロケーター
     in-out property <int> total-count: 0;   // リストの全件数
     in-out property <bool> show-clock: true;
     in-out property <bool> show-seconds: true;
@@ -78,9 +84,13 @@ export global Backend {
     in-out property <bool> d-sec: true;
     in-out property <bool> d-popup: true;
     in-out property <string> d-call;
+    in-out property <string> d-gl;
     in-out property <[bool]> d-col-show;
+    in-out property <[int]> d-col-order;   // 設定メニューで編集中の表示順（項目番号を左から）
     in-out property <string> clock-text;
-    in-out property <[bool]> col-show;   // 一覧・履歴に表示する項目（15個）
+    in-out property <[bool]> col-show;   // 一覧・履歴に表示する項目（19個）
+    in-out property <[int]> vis-cols;    // 表示する項目の番号（表示順＝左から）
+    in-out property <[length]> col-w;    // 項目ごとの列幅（19個）
     in-out property <int> focus-tick: 0;   // 日付欄へ
     in-out property <int> end-tick: 0;     // 保存ボタンへ
     in-out property <bool> sort-asc: true; // 一覧・履歴共通の並び順
@@ -94,9 +104,14 @@ export global Backend {
     callback lookup(string);
     callback save();
     callback edit-row(int);
+    in-out property <bool> confirm-del: false;   // 削除の確認画面を出す
     callback edit-end(int);          // 0=保存して終了 1=保存せず終了 2=元に戻す 3=削除
     callback sort(bool);
     callback cols-changed();
+    callback seg(int, int, int) -> int;        // 日付・時刻の ← → の移動先（種類, カーソル位置, 向き）
+    callback resize(int, length);              // 列幅の変更（項目番号, 新しい幅）
+    callback col-move(int, int);               // 設定メニューの表示順（位置, -1=上 +1=下）
+    callback calc(string, string, string) -> Dist;   // 自局GL・入力GL・検索GL → 距離と方角
     callback settings-open();
     callback settings-save();
     callback preview-goto(int);
@@ -111,7 +126,7 @@ export global Backend {
     callback filter(int, string, int) -> Edit;
     callback cycle(int, string, int) -> string;
     callback byte-len(string) -> int;
-    callback rst-step(string, int) -> string;   // RSTの↑↓（d=+1/-1）
+    callback rst-step(string, int, int) -> string;   // RSTの↑↓（文字列, 選択した桁の位置, d=+1/-1）
     callback last(int) -> string;    // 0=周波数 1=モード 2=出力 3=RST(S)の開始値 4=RST(R)の開始値
 }
 
@@ -162,30 +177,26 @@ export global Metrics {
     // コールサインの等幅フォント。起動時に main.rs が OS に合わせて入れる（Windows: Consolas / Linux: Inconsolata）
     in-out property <string> mono-font: "Consolas";
 }
+// 項目番号：0=日付 1=開始 2=終了 3=コールサイン 4=RST(S) 5=RST(R) 6=周波数 7=モード 8=出力 9=名前 10=QTH
+//           11=常置場所 12=市郡区ナンバー 13=一括表示 14=メモ 15=GL 16=検索GL 17=距離 18=方角
 export global Cols {
-    in-out property <length> date: 130px;
-    in-out property <length> t-start: 70px;
-    in-out property <length> t-end: 70px;
-    in-out property <length> call: 124px;
-    in-out property <length> rst-s: 60px;
-    in-out property <length> rst-r: 60px;
-    in-out property <length> freq: 76px;
-    in-out property <length> mode: 62px;
-    in-out property <length> power: 68px;
-    in-out property <length> name: 124px;
-    in-out property <length> qth: 170px;
-    in-out property <length> loc: 170px;
-    in-out property <length> num: 110px;
-    in-out property <length> spec: 170px;
+    out property <[string]> head: ["日付", "開始", "終了", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
+        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+    out property <[string]> name: ["日付", "開始時刻", "終了時刻", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
+        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+    // 等幅フォントで表示する項目
+    out property <[bool]> mono: [true, true, true, true, true, true, true, true, true, false, false, false, true, true,
+        false, true, true, true, false];
 }
 
 // ---- 入力欄 ------------------------------------------------------------
-// kind: -1=通常 0=コールサイン 1=数字 2=日付 3=時刻 4=選択肢(↑↓で循環)
+// kind: -1=通常 0=コールサイン 1=数字 2=日付 3=時刻 4=選択肢(↑↓で循環) 5=グリッドロケーター
 component Field inherits Rectangle {
     in property <int> kind: -1;
     in property <int> opt-kind: -1;
     in property <bool> mono: false;
-    in property <bool> rst: false;   // RST欄：↑↓でSの桁を1〜9で増減
+    in property <bool> rst: false;   // RST欄：← →で桁を選び、↑↓で選んだ桁を増減（最上位は1〜5、ほかは1〜9）
+    in-out property <int> sel: 1;    // RST欄で選んでいる桁（0=左端。初めは2桁なら1の桁、3桁なら10の桁＝左から2番目）
     in property <bool> display: false;
     in property <bool> active: true;
     in property <bool> locked: false;
@@ -198,6 +209,12 @@ component Field inherits Rectangle {
     callback focus-gained();
     callback edited();
     public function focus-input() { ti.focus(); }
+    // 日付は年・月・日、時刻は時・分の、カーソルがある区切りを反転表示する
+    function seg-select(c: int) {
+        let e = root.kind == 2 ? (c <= 4 ? 4 : c <= 7 ? 7 : 10) : (c <= 2 ? 2 : 5);
+        let b = root.kind == 2 ? (e == 4 ? 0 : e == 7 ? 5 : 8) : (e == 2 ? 0 : 3);
+        ti.set-selection-offsets(b, e);
+    }
     public function cursor-end() {
         ti.set-selection-offsets(Backend.byte-len(ti.text), Backend.byte-len(ti.text));
     }
@@ -220,14 +237,15 @@ component Field inherits Rectangle {
             if (e.text == Key.UpArrow || e.text == Key.DownArrow) {
                 let d = e.text == Key.UpArrow ? 1 : -1;
                 if (root.rst) {
-                    ti.text = Backend.rst-step(ti.text, d);
-                    root.cursor-end();
+                    let i = max(0, min(root.sel, Backend.byte-len(ti.text) - 1));
+                    ti.text = Backend.rst-step(ti.text, i, d);
+                    ti.set-selection-offsets(i, i + 1);   // 選んでいる桁を反転表示
                     return EventResult.accept;
                 }
                 if (root.kind == 2 || root.kind == 3) {
                     let r = Backend.step(root.kind, ti.text, ti.cursor-position-byte-offset, d);
                     ti.text = r.text;
-                    ti.set-selection-offsets(r.cursor, r.cursor);
+                    root.seg-select(r.cursor);
                     return EventResult.accept;
                 }
                 if (root.kind == 4) {
@@ -235,18 +253,31 @@ component Field inherits Rectangle {
                     return EventResult.accept;
                 }
             }
+            // RST：← →で、↑↓で増減する桁を選ぶ
+            if (root.rst && (e.text == Key.LeftArrow || e.text == Key.RightArrow)
+                && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt) {
+                let n = Backend.byte-len(ti.text);
+                root.sel = max(0, min(n - 1, root.sel + (e.text == Key.RightArrow ? 1 : -1)));
+                ti.set-selection-offsets(root.sel, root.sel + 1);
+                return EventResult.accept;
+            }
+            // 日付は年・月・日、時刻は時・分の単位で ← → を動かす（その他の欄は1文字ずつ）
+            if ((root.kind == 2 || root.kind == 3) && (e.text == Key.LeftArrow || e.text == Key.RightArrow)
+                && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt) {
+                let p = Backend.seg(root.kind, ti.cursor-position-byte-offset, e.text == Key.RightArrow ? 1 : -1);
+                root.seg-select(p);
+                return EventResult.accept;
+            }
             if (root.own-tab) {
                 if (e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
                 if (e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
-                // ←：前項目へ（Shift・Ctrl・Alt を押しているときは、ふつうのカーソル移動）
-                if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)
-                    || (e.text == Key.LeftArrow && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt)) {
+                // 前項目へ（← → では項目を移らない）
+                if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)) {
                     root.tab-prev();
                     return EventResult.accept;
                 }
-                // Enter・→：入力を確定して次項目へ
+                // Enter：入力を確定して次項目へ
                 if (e.text == Key.PageDown || e.text == Key.Return
-                    || (e.text == Key.RightArrow && !e.modifiers.shift && !e.modifiers.control && !e.modifiers.alt)
                     || (e.text == Key.Tab && !e.modifiers.shift)) {
                     root.accepted();
                     root.tab-next();
@@ -270,7 +301,8 @@ component Field inherits Rectangle {
             selection-foreground-color: Theme.sel-fg;
             accepted => { root.accepted(); }
             edited => {
-                if (root.kind >= 0 && root.kind <= 3) {
+                if (root.rst) { root.sel = 1; }
+                if ((root.kind >= 0 && root.kind <= 3) || root.kind == 5) {
                     let r = Backend.filter(root.kind, self.text, self.cursor-position-byte-offset);
                     if (r.text != self.text) {
                         self.text = r.text;
@@ -409,7 +441,7 @@ component MenuPanel inherits Rectangle {
     callback save();
     callback cancel();
     width: root.call-input ? 340px : 280px;
-    height: root.items.length * 28px + 2px + (root.call-input ? 48px : 0px) + (root.footer ? 36px : 0px);
+    height: root.items.length * 28px + 2px + (root.call-input ? 96px : 0px) + (root.footer ? 36px : 0px);
     background: Theme.pop-bg;
     border-width: 1px;
     border-color: Theme.pop-border;
@@ -437,7 +469,77 @@ component MenuPanel inherits Rectangle {
                 }
             }
         }
+        if root.call-input: Rectangle {
+            height: 48px;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+                Text { text: "自局のGL"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                VerticalLayout {
+                    alignment: center;
+                    Field {
+                        kind: 5; mono: true; text <=> Backend.d-gl;
+                    }
+                }
+            }
+        }
         if root.footer: Rectangle {
+            height: 36px;
+            Rectangle { y: 0px; height: 1px; background: Theme.sep; }
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 8px;
+                alignment: end;
+                Btn { label: "保存"; k: 0.6667; tab-skip: true; clicked => { root.save(); } }
+                Btn { label: "キャンセル"; k: 0.6667; tab-skip: true; clicked => { root.cancel(); } }
+            }
+        }
+    }
+}
+
+// 表示項目と表示順の設定（項目名をクリックで表示／非表示、▲▼で順序を入れ替え）
+component ColMenu inherits Rectangle {
+    callback toggle(int);
+    callback shift(int, int);
+    callback save();
+    callback cancel();
+    width: 340px;
+    height: Backend.d-col-order.length * 26px + 2px + 36px;
+    background: Theme.pop-bg;
+    border-width: 1px;
+    border-color: Theme.pop-border;
+    TouchArea { }   // すき間のクリックが、後ろの「メニューを閉じる」に届かないようにする
+    VerticalLayout {
+        for cid[pos] in Backend.d-col-order: Rectangle {
+            height: 26px;
+            background: tg.has-hover ? Theme.hover : transparent;
+            Text {
+                x: 34px;
+                text: Cols.name[cid];
+                font-size: 14px; color: Theme.text; vertical-alignment: center;
+            }
+            tg := TouchArea { width: parent.width - 76px; clicked => { root.toggle(cid); } }
+            Text {
+                x: 8px; width: 24px;
+                text: Backend.d-col-show[cid] ? "☑" : "□";
+                font-size: 16px; color: Theme.text; vertical-alignment: center; horizontal-alignment: center;
+            }
+            TouchArea { x: 0px; width: 34px; clicked => { root.toggle(cid); } }
+            Rectangle {
+                x: parent.width - 70px; y: 2px; width: 30px; height: parent.height - 4px;
+                background: ua.has-hover ? Theme.hover : Theme.arrow-bg;
+                Text { text: "▲"; font-size: 12px; color: pos == 0 ? Theme.sep : Theme.arrow-text; horizontal-alignment: center; vertical-alignment: center; }
+                ua := TouchArea { clicked => { root.shift(pos, -1); } }
+            }
+            Rectangle {
+                x: parent.width - 36px; y: 2px; width: 30px; height: parent.height - 4px;
+                background: da.has-hover ? Theme.hover : Theme.arrow-bg;
+                Text { text: "▼"; font-size: 12px; color: pos == Backend.d-col-order.length - 1 ? Theme.sep : Theme.arrow-text; horizontal-alignment: center; vertical-alignment: center; }
+                da := TouchArea { clicked => { root.shift(pos, 1); } }
+            }
+        }
+        Rectangle {
             height: 36px;
             Rectangle { y: 0px; height: 1px; background: Theme.sep; }
             HorizontalLayout {
@@ -471,24 +573,21 @@ component RowLine inherits Rectangle {
     callback clicked();
     height: 34px;
     background: root.selected ? Theme.row-sel : rta.has-hover ? Theme.row-hover : root.shade ? Theme.row-shade : Theme.row;
+    // 項目番号 → 表示する文字
+    property <[string]> cells: [root.r.date, root.r.t-start, root.r.t-end, root.r.call, root.r.rst-s, root.r.rst-r,
+        root.r.freq, root.r.mode, root.r.power, root.r.name, root.r.qth, root.r.loc, root.r.num, root.r.spec, root.r.memo,
+        root.r.gl, root.r.ngl, root.r.dist, root.r.bear];
     HorizontalLayout {
         padding-left: 6px;
         spacing: 6px;
-        if Backend.col-show[0]: Cell { preferred-width: Cols.date; text: root.r.date; font-family: Metrics.mono-font; }
-        if Backend.col-show[1]: Cell { preferred-width: Cols.t-start; text: root.r.t-start; font-family: Metrics.mono-font; }
-        if Backend.col-show[2]: Cell { preferred-width: Cols.t-end; text: root.r.t-end; font-family: Metrics.mono-font; }
-        if Backend.col-show[3]: Cell { preferred-width: Cols.call; text: root.r.call; font-family: Metrics.mono-font; }
-        if Backend.col-show[4]: Cell { preferred-width: Cols.rst-s; text: root.r.rst-s; font-family: Metrics.mono-font; }
-        if Backend.col-show[5]: Cell { preferred-width: Cols.rst-r; text: root.r.rst-r; font-family: Metrics.mono-font; }
-        if Backend.col-show[6]: Cell { preferred-width: Cols.freq; text: root.r.freq; font-family: Metrics.mono-font; }
-        if Backend.col-show[7]: Cell { preferred-width: Cols.mode; text: root.r.mode; font-family: Metrics.mono-font; }
-        if Backend.col-show[8]: Cell { preferred-width: Cols.power; text: root.r.power; font-family: Metrics.mono-font; }
-        if Backend.col-show[9]: Cell { preferred-width: Cols.name; text: root.r.name; }
-        if Backend.col-show[10]: Cell { preferred-width: Cols.qth; text: root.r.qth; }
-        if Backend.col-show[11]: Cell { preferred-width: Cols.loc; text: root.r.loc; }
-        if Backend.col-show[12]: Cell { preferred-width: Cols.num; text: root.r.num; font-family: Metrics.mono-font; }
-        if Backend.col-show[13]: Cell { preferred-width: Cols.spec; text: root.r.spec; font-family: Metrics.mono-font; }
-        if Backend.col-show[14]: Cell { text: root.r.memo; horizontal-stretch: 1; }
+        for ci in Backend.vis-cols: Cell {
+            preferred-width: Backend.col-w[ci];
+            min-width: ci == 14 ? 40px : Backend.col-w[ci];
+            horizontal-stretch: ci == 14 ? 1 : 0;
+            text: root.cells[ci];
+            font-family: Cols.mono[ci] ? Metrics.mono-font : "";
+            font-size: Cols.mono[ci] ? 19.8px : 18px;   // 等幅フォントは1.1倍
+        }
         if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
     }
     rta := TouchArea {
@@ -503,17 +602,19 @@ component RowLine inherits Rectangle {
 
 component HCell inherits Rectangle {
     in property <string> label;
-    in-out property <length> w;
-    preferred-width: root.w;
-    min-width: 0px;
+    in property <int> c;                 // 項目番号
+    in property <bool> resizable: true;
+    preferred-width: Backend.col-w[root.c];
+    min-width: root.c == 14 ? 40px : Backend.col-w[root.c];   // メモ以外は幅を固定（見出しと各行の位置がずれないように）
     horizontal-stretch: 0;
     Text { x: 0px; width: parent.width - 8px; text: root.label; font-size: 18px; color: Theme.text; vertical-alignment: center; overflow: elide; }
     Rectangle { x: parent.width - 1px; width: 1px; background: Theme.head-line; }
     TouchArea {
+        enabled: root.resizable;
         x: parent.width - 8px;
         width: 8px;
         mouse-cursor: col-resize;
-        moved => { root.w = max(30px, root.w + (self.mouse-x - self.pressed-x)); }
+        moved => { Backend.resize(root.c, max(30px, Backend.col-w[root.c] + (self.mouse-x - self.pressed-x))); }
         pointer-event(e) => { if (e.kind == PointerEventKind.up) { Backend.cols-changed(); } }
     }
 }
@@ -524,21 +625,12 @@ component HeaderLine inherits Rectangle {
     HorizontalLayout {
         padding-left: 6px;
         spacing: 6px;
-        if Backend.col-show[0]: HCell { label: "日付"; w <=> Cols.date; }
-        if Backend.col-show[1]: HCell { label: "開始"; w <=> Cols.t-start; }
-        if Backend.col-show[2]: HCell { label: "終了"; w <=> Cols.t-end; }
-        if Backend.col-show[3]: HCell { label: "コールサイン"; w <=> Cols.call; }
-        if Backend.col-show[4]: HCell { label: "RST(S)"; w <=> Cols.rst-s; }
-        if Backend.col-show[5]: HCell { label: "RST(R)"; w <=> Cols.rst-r; }
-        if Backend.col-show[6]: HCell { label: "周波数"; w <=> Cols.freq; }
-        if Backend.col-show[7]: HCell { label: "モード"; w <=> Cols.mode; }
-        if Backend.col-show[8]: HCell { label: "出力"; w <=> Cols.power; }
-        if Backend.col-show[9]: HCell { label: "名前"; w <=> Cols.name; }
-        if Backend.col-show[10]: HCell { label: "QTH"; w <=> Cols.qth; }
-        if Backend.col-show[11]: HCell { label: "常置場所"; w <=> Cols.loc; }
-        if Backend.col-show[12]: HCell { label: "市郡区ナンバー"; w <=> Cols.num; }
-        if Backend.col-show[13]: HCell { label: "一括表示"; w <=> Cols.spec; }
-        if Backend.col-show[14]: Cell { text: "メモ"; horizontal-stretch: 1; }
+        for ci in Backend.vis-cols: HCell {
+            c: ci;
+            label: Cols.head[ci];
+            resizable: ci != 14;
+            horizontal-stretch: ci == 14 ? 1 : 0;
+        }
         if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
     }
 }
@@ -684,14 +776,14 @@ component InputScreen inherits Rectangle {
                     }
                 }
                 FieldLabel {
-                    label: "コールサイン"; preferred-width: Metrics.cw * 14 + 22px;
+                    label: "コールサイン"; preferred-width: Metrics.cw * 10 + 22px;
                     call-f := Field {
                         kind: 0; mono: true; own-tab: true; tab-next => { rsts-f.focus-input(); } tab-prev => { start-f.focus-input(); } text <=> Form.call;
                         accepted => { Backend.lookup(self.text); }
                     }
                 }
-                FieldLabel { label: "RST(S)"; preferred-width: Metrics.cw * 4 + 14px; rsts-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-s == "") { Form.rst-s = Backend.last(3); } self.cursor-end(); } tab-next => { rstr-f.focus-input(); } tab-prev => { call-f.focus-input(); } text <=> Form.rst-s; } }
-                FieldLabel { label: "RST(R)"; preferred-width: Metrics.cw * 4 + 14px; rstr-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-r == "") { Form.rst-r = Backend.last(4); } self.cursor-end(); } tab-next => { freq-c.focus-input(); } tab-prev => { rsts-f.focus-input(); } text <=> Form.rst-r; } }
+                FieldLabel { label: "RST(S)"; preferred-width: Metrics.cw * 4 + 14px; rsts-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-s == "") { Form.rst-s = Backend.last(3); } self.sel = 1; self.cursor-end(); } tab-next => { rstr-f.focus-input(); } tab-prev => { call-f.focus-input(); } text <=> Form.rst-s; } }
+                FieldLabel { label: "RST(R)"; preferred-width: Metrics.cw * 4 + 14px; rstr-f := Field { kind: 1; rst: true; mono: true; own-tab: true; focus-gained => { if (Form.rst-r == "") { Form.rst-r = Backend.last(4); } self.sel = 1; self.cursor-end(); } tab-next => { freq-c.focus-input(); } tab-prev => { rsts-f.focus-input(); } text <=> Form.rst-r; } }
                 FieldLabel {
                     label: "周波数"; preferred-width: Metrics.cw * 9 + 30px;
                     freq-c := Choice {
@@ -716,12 +808,23 @@ component InputScreen inherits Rectangle {
                         focus-gained => { if (Form.power == "") { Form.power = Backend.last(2); } }
                     }
                 }
-                FieldLabel { label: "名前"; preferred-width: Metrics.cw * 16 + 22px; name-f := Field { own-tab: true; tab-next => { qth-f.focus-input(); } tab-prev => { power-c.focus-input(); } text <=> Form.name; } }
-                FieldLabel { label: "QTH"; preferred-width: Metrics.cw * 20 + 22px; qth-f := Field { own-tab: true; tab-next => { memo-fs.focus(); } tab-prev => { name-f.focus-input(); } text <=> Form.qth; } }
+                FieldLabel { label: "名前"; preferred-width: 21px * 8 + 22px; name-f := Field { own-tab: true; tab-next => { qth-f.focus-input(); } tab-prev => { power-c.focus-input(); } text <=> Form.name; } }
+                FieldLabel { label: "QTH"; preferred-width: 21px * 12 + 22px; qth-f := Field { own-tab: true; tab-next => { gl-f.focus-input(); } tab-prev => { name-f.focus-input(); } text <=> Form.qth; } }
+                FieldLabel {
+                    label: "GL"; preferred-width: Metrics.cw * 8 + 22px;
+                    gl-f := Field {
+                        kind: 5; mono: true; own-tab: true;
+                        tab-next => { memo-fs.focus(); }
+                        tab-prev => { qth-f.focus-input(); }
+                        text <=> Form.gl;
+                        edited => { let r = Backend.calc(Backend.my-gl, Form.gl, Form.ngl); Form.dist = r.dist; Form.bear = r.bear; }
+                        accepted => { let r = Backend.calc(Backend.my-gl, Form.gl, Form.ngl); Form.dist = r.dist; Form.bear = r.bear; }
+                    }
+                }
             }
         }
 
-        // 2段目：メモ（半角72文字・5行）と 常置場所 / 市郡区ナンバー / 一括表示
+        // 2段目：メモ（半角72文字・5行）と、右側に2段（常置場所 / 市郡区ナンバー / 一括表示 と GL / 検索GL / 距離 / 方角）
         HorizontalLayout {
             height: 188px;
             spacing: 8px;
@@ -739,7 +842,7 @@ component InputScreen inherits Rectangle {
                             if (e.text == Key.Home) { Backend.focus-tick += 1; return EventResult.accept; }
                             if (e.text == Key.End) { Backend.end-tick += 1; return EventResult.accept; }
                             if (e.text == Key.PageUp || e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift)) {
-                                qth-f.focus-input();
+                                gl-f.focus-input();
                                 return EventResult.accept;
                             }
                             if (e.text == Key.PageDown || e.text == Key.Tab) {
@@ -748,25 +851,62 @@ component InputScreen inherits Rectangle {
                             }
                             return EventResult.reject;
                         }
-                        memo-te := TextEdit {
-                            x: 3px; y: 3px; width: parent.width - 6px; height: parent.height - 6px;
-                            wrap: word-wrap;
-                            text <=> Form.memo;
+                        flk := Flickable {
+                            x: 6px; y: 3px; width: parent.width - 12px; height: parent.height - 6px;
+                            content-height: max(self.height, memo-te.preferred-height);
+                            memo-te := TextInput {
+                                x: 0px; y: 0px; width: flk.width;
+                                single-line: false;   // Enterで改行できるように
+                                wrap: word-wrap;
+                                color: Theme.text;
+                                selection-background-color: Theme.sel-bg;
+                                selection-foreground-color: Theme.sel-fg;
+                                text <=> Form.memo;
+                                // カーソルが見える範囲に、表示をスクロールする
+                                cursor-position-changed(p) => {
+                                    if (p.y + flk.content-y < 0px) { flk.content-y = -p.y; }
+                                    else if (p.y + 30px + flk.content-y > flk.height) { flk.content-y = flk.height - p.y - 30px; }
+                                }
+                            }
                         }
                     }
                 }
             }
-            FieldLabel {
-                label: "常置場所"; preferred-width: Metrics.cw * 20 + 22px;
-                Field { display: true; active: Backend.use-api; text: Form.loc; }
-            }
-            FieldLabel {
-                label: "市郡区ナンバー"; preferred-width: Metrics.cw * 15 + 22px;
-                Field { display: true; mono: true; active: Backend.use-api; text: Form.num; }
-            }
-            FieldLabel {
-                label: "一括表示"; preferred-width: Metrics.cw * 15 + 22px;
-                Field { display: true; mono: true; active: Backend.use-api; text: Form.spec; }
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    FieldLabel {
+                        label: "常置場所"; preferred-width: Metrics.cw * 26 + 22px;
+                        Field { display: true; active: Backend.use-api; text: Form.loc; }
+                    }
+                    FieldLabel {
+                        label: "市郡区ナンバー"; preferred-width: Metrics.cw * 12 + 22px;
+                        Field { display: true; mono: true; active: Backend.use-api; text: Form.num; }
+                    }
+                    FieldLabel {
+                        label: "一括表示"; preferred-width: Metrics.cw * 12 + 22px;
+                        Field { display: true; mono: true; active: Backend.use-api; text: Form.spec; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    FieldLabel {
+                        label: "検索GL"; preferred-width: Metrics.cw * 8 + 22px;
+                        Field { display: true; mono: true; active: Backend.use-api; text: Form.ngl; }
+                    }
+                    FieldLabel {
+                        label: "距離"; preferred-width: Metrics.cw * 11 + 22px;
+                        Field { display: true; mono: true; text: Form.dist; }
+                    }
+                    FieldLabel {
+                        label: "方角"; preferred-width: Metrics.cw * 12 + 22px;
+                        Field { display: true; text: Form.bear; }
+                    }
+                }
             }
         }
 
@@ -831,7 +971,7 @@ component InputScreen inherits Rectangle {
                             own-tab: true; own-prev: true;
                             tab-next => { date-f.focus-input(); }
                             tab-prev => { eb2.focus-input(); }
-                            clicked => { Backend.edit-end(3); }
+                            clicked => { Backend.confirm-del = true; }
                         }
                     }
                 }
@@ -882,8 +1022,8 @@ component ListScreen inherits Rectangle {
             if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
             if ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.DownArrow) { root.select(root.sel + 1); return EventResult.accept; }
             if (e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift) || e.text == Key.UpArrow) { root.select(root.sel - 1); return EventResult.accept; }
-            if (e.text == Key.PageDown) { root.select(root.sel + 12); return EventResult.accept; }
-            if (e.text == Key.PageUp) { root.select(root.sel - 12); return EventResult.accept; }
+            if (e.text == Key.PageDown) { root.select(root.sel + 15); return EventResult.accept; }
+            if (e.text == Key.PageUp) { root.select(root.sel - 15); return EventResult.accept; }
             if (e.text == Key.Home) { root.select(0); return EventResult.accept; }
             if (e.text == Key.End) { root.select(Backend.rows.length - 1); return EventResult.accept; }
             if (e.text == Key.Return && root.sel >= 0 && root.sel < Backend.rows.length) {
@@ -979,6 +1119,14 @@ component HelpScreen inherits Rectangle {
     hfs := FocusScope {
         capture-key-pressed(e) => {
             if (e.text == Key.Escape) { Backend.help-open = false; return EventResult.accept; }
+            // キーでスクロール
+            let low = min(0px, hflk.height - hflk.content-height);
+            if (e.text == Key.PageDown) { hflk.content-y = max(low, hflk.content-y - (hflk.height - 40px)); return EventResult.accept; }
+            if (e.text == Key.PageUp) { hflk.content-y = min(0px, hflk.content-y + (hflk.height - 40px)); return EventResult.accept; }
+            if (e.text == Key.DownArrow) { hflk.content-y = max(low, hflk.content-y - 40px); return EventResult.accept; }
+            if (e.text == Key.UpArrow) { hflk.content-y = min(0px, hflk.content-y + 40px); return EventResult.accept; }
+            if (e.text == Key.Home) { hflk.content-y = 0px; return EventResult.accept; }
+            if (e.text == Key.End) { hflk.content-y = low; return EventResult.accept; }
             return EventResult.reject;
         }
         VerticalLayout {
@@ -990,7 +1138,27 @@ component HelpScreen inherits Rectangle {
                 Text { text: Backend.help-title; font-size: 22px; color: Theme.text; vertical-alignment: center; }
                 Btn { label: "閉じる"; tab-skip: true; clicked => { Backend.help-open = false; } }
             }
-            TextEdit { vertical-stretch: 1; read-only: true; wrap: word-wrap; font-size: 18px; text: Backend.help-text; }
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg;
+                border-width: 1px;
+                border-color: Theme.border;
+                hflk := Flickable {
+                    x: 8px; y: 4px; width: parent.width - 16px; height: parent.height - 8px;
+                    content-height: max(self.height, htx.preferred-height);
+                    htx := TextInput {
+                        x: 0px; y: 0px; width: hflk.width - 4px;
+                        read-only: true;
+                        wrap: word-wrap;
+                        font-size: 18px;
+                        font-family: Metrics.ui-font;
+                        color: Theme.text;
+                        selection-background-color: Theme.sel-bg;
+                        selection-foreground-color: Theme.sel-fg;
+                        text: Backend.help-text;
+                    }
+                }
+            }
         }
     }
 }
@@ -1047,6 +1215,56 @@ component PreviewScreen inherits Rectangle {
             }
         }
     }
+}
+
+// 確認画面（全体を覆う）。初めは「キャンセル」にフォーカスがあり、Esc でも取り消せる
+component ConfirmDialog inherits Rectangle {
+    in property <string> message;
+    in property <string> ok-label: "OK";
+    callback ok();
+    callback cancel();
+    background: #00000080;
+    TouchArea { }
+    Rectangle {
+        width: 440px;
+        height: 170px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.pop-bg;
+        border-width: 1px;
+        border-color: Theme.pop-border;
+        border-radius: 6px;
+        dfs := FocusScope {
+            key-pressed(e) => {
+                if (e.text == Key.Escape) { root.cancel(); return EventResult.accept; }
+                return EventResult.reject;
+            }
+            VerticalLayout {
+                padding: 20px;
+                spacing: 20px;
+                Text { text: root.message; font-size: 18px; color: Theme.text; wrap: word-wrap; vertical-alignment: center; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+                    okb := Btn {
+                        label: root.ok-label; focus-bg: #d32f2f; focus-fg: #ffffff; hover-color: true;
+                        own-tab: true; own-prev: true;
+                        tab-next => { cb.focus-input(); }
+                        tab-prev => { cb.focus-input(); }
+                        clicked => { root.ok(); }
+                    }
+                    cb := Btn {
+                        label: "キャンセル"; focus-bg: #7fd4ff; hover-color: true;
+                        own-tab: true; own-prev: true;
+                        tab-next => { okb.focus-input(); }
+                        tab-prev => { okb.focus-input(); }
+                        clicked => { root.cancel(); }
+                    }
+                }
+            }
+        }
+    }
+    init => { cb.focus-input(); }
 }
 
 export component MainWindow inherits Window {
@@ -1149,7 +1367,7 @@ export component MainWindow inherits Window {
     }
     if root.open-menu == 0: MenuPanel {
         x: mh0.absolute-position.x; y: 30px;
-        items: ["ファイルを開く…", "ファイルを新規作成…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
+        items: ["ファイルを開く…", "ファイルを新規作成…", "名前を付けて保存…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
         picked(i) => { root.open-menu = -1; Backend.menu(0, i); }
     }
     if root.open-menu == 4: MenuPanel {
@@ -1169,39 +1387,23 @@ export component MainWindow inherits Window {
         items: [(Backend.d-use-api ? "● " : "○ ") + "総務省無線局検索APIを使用する",
                 (Backend.d-use-api ? "○ " : "● ") + "使用しない",
                 "",
-                "市郡区ナンバーのファイルの選択…",
-                "一覧・履歴の表示項目…",
+                "リスト・履歴の表示項目と順序…",
                 "",
                 (Backend.d-dark ? "☑ " : "□ ") + "ダークモード",
                 (Backend.d-clock ? "☑ " : "□ ") + "時計表示",
                 (Backend.d-sec ? "☑ " : "□ ") + "時計の秒表示",
                 (Backend.d-popup ? "☑ " : "□ ") + "ポップアップ表示"];
         picked(i) => {
-            if (i == 4) { root.open-menu = 3; }
+            if (i == 3) { root.open-menu = 3; }
             else { Backend.menu(2, i); }
         }
         save => { root.open-menu = -1; Backend.settings-save(); }
         cancel => { root.open-menu = -1; }
     }
-    if root.open-menu == 3: MenuPanel {
+    if root.open-menu == 3: ColMenu {
         x: mh2.absolute-position.x; y: 30px;
-        footer: true;
-        items: [(Backend.d-col-show[0] ? "☑ " : "□ ") + "日付",
-                (Backend.d-col-show[1] ? "☑ " : "□ ") + "開始時刻",
-                (Backend.d-col-show[2] ? "☑ " : "□ ") + "終了時刻",
-                (Backend.d-col-show[3] ? "☑ " : "□ ") + "コールサイン",
-                (Backend.d-col-show[4] ? "☑ " : "□ ") + "RST(S)",
-                (Backend.d-col-show[5] ? "☑ " : "□ ") + "RST(R)",
-                (Backend.d-col-show[6] ? "☑ " : "□ ") + "周波数",
-                (Backend.d-col-show[7] ? "☑ " : "□ ") + "モード",
-                (Backend.d-col-show[8] ? "☑ " : "□ ") + "出力",
-                (Backend.d-col-show[9] ? "☑ " : "□ ") + "名前",
-                (Backend.d-col-show[10] ? "☑ " : "□ ") + "QTH",
-                (Backend.d-col-show[11] ? "☑ " : "□ ") + "常置場所",
-                (Backend.d-col-show[12] ? "☑ " : "□ ") + "市郡区ナンバー",
-                (Backend.d-col-show[13] ? "☑ " : "□ ") + "一括表示",
-                (Backend.d-col-show[14] ? "☑ " : "□ ") + "メモ"];
-        picked(i) => { Backend.menu(3, i); }
+        toggle(i) => { Backend.menu(3, i); }
+        shift(p, d) => { Backend.col-move(p, d); }
         save => { root.open-menu = -1; Backend.settings-save(); }
         cancel => { root.open-menu = -1; }
     }
@@ -1211,4 +1413,13 @@ export component MainWindow inherits Window {
 
     // ヘルプ（全体を覆う）
     if Backend.help-open: HelpScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+
+    // 削除の確認（全体を覆う）
+    if Backend.confirm-del: ConfirmDialog {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        message: "この記録を削除します。削除すると元に戻せません。よろしいですか？";
+        ok-label: "削除する";
+        ok => { Backend.confirm-del = false; Backend.edit-end(3); }
+        cancel => { Backend.confirm-del = false; }
+    }
 }
