@@ -1929,20 +1929,31 @@ fn main() -> Result<(), slint::PlatformError> {
       bk.on_search(move |q| { let ui = w.unwrap(); let mut s = a.borrow_mut(); s.query = q.to_string(); ui.global::<Backend>().set_query(q); refresh_list(&ui, &s); }); }
 
     // 起動時：最後に開いたファイルの一覧表示から。無ければ案内を表示
-    {
-        let mut s = app.borrow_mut();
-        let last = s.cfg.last_file.clone().map(PathBuf::from).filter(|p| p.exists());
-        let opened = match last { Some(p) => open_file(&ui, &mut s, p).is_ok(), None => false };
-        if !opened {
-            bk.set_message("「ファイル」メニューから、ファイルを開くか新規作成してください".into());
-            bk.set_screen(1);
-        }
-    }
-
-    ui.show()?;
+    // ウィンドウを先に表示してイベントループに入ってから読み込む（起動直後の「応答していません」対策）
     #[cfg(windows)]
-    fit_to_screen(&ui);
+    {
+        ui.show()?;
+        fit_to_screen(&ui);
+    }
     #[cfg(not(windows))]
-    ui.window().set_maximized(true);
+    {
+        ui.window().set_maximized(true);
+        ui.show()?;
+    }
+    {
+        let w = ui.as_weak();
+        let a = app.clone();
+        slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
+            let Some(ui) = w.upgrade() else { return };
+            let mut s = a.borrow_mut();
+            let last = s.cfg.last_file.clone().map(PathBuf::from).filter(|p| p.exists());
+            let opened = match last { Some(p) => open_file(&ui, &mut s, p).is_ok(), None => false };
+            if !opened {
+                let bk = ui.global::<Backend>();
+                bk.set_message("「ファイル」メニューから、ファイルを開くか新規作成してください".into());
+                bk.set_screen(1);
+            }
+        });
+    }
     ui.run()
 }

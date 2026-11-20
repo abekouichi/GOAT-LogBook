@@ -92,6 +92,8 @@ export global Backend {
     in-out property <[int]> vis-cols;    // 表示する項目の番号（表示順＝左から）
     in-out property <[length]> col-w;    // 項目ごとの列幅（19個）
     in-out property <int> focus-tick: 0;   // 日付欄へ
+    in-out property <int> hscroll-tick: 0; // 履歴の左右スクロール要求（Alt+←/→）
+    in-out property <int> hscroll-dir: 0;
     in-out property <int> end-tick: 0;     // 保存ボタンへ
     in-out property <bool> sort-asc: true; // 一覧・履歴共通の並び順
     in-out property <[LogRow]> rows;
@@ -572,12 +574,18 @@ component RowLine inherits Rectangle {
     callback dbl();
     callback clicked();
     height: 34px;
-    background: root.selected ? Theme.row-sel : rta.has-hover ? Theme.row-hover : root.shade ? Theme.row-shade : Theme.row;
+    // 背景は下のRectangleで描く（横スクロールで右へ行っても途切れないよう、列の合計幅まで伸ばす）
     // 項目番号 → 表示する文字
     property <[string]> cells: [root.r.date, root.r.t-start, root.r.t-end, root.r.call, root.r.rst-s, root.r.rst-r,
         root.r.freq, root.r.mode, root.r.power, root.r.name, root.r.qth, root.r.loc, root.r.num, root.r.spec, root.r.memo,
         root.r.gl, root.r.ngl, root.r.dist, root.r.bear];
-    HorizontalLayout {
+    Rectangle {
+        x: 0px; y: 0px;
+        width: max(root.width, rowlay.min-width);
+        height: root.height;
+        background: root.selected ? Theme.row-sel : rta.has-hover ? Theme.row-hover : root.shade ? Theme.row-shade : Theme.row;
+    }
+    rowlay := HorizontalLayout {
         padding-left: 6px;
         spacing: 6px;
         for ci in Backend.vis-cols: Cell {
@@ -591,6 +599,7 @@ component RowLine inherits Rectangle {
         if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
     }
     rta := TouchArea {
+        width: max(root.width, rowlay.min-width);
         clicked => { root.clicked(); }
         double-clicked => { if (!root.header) { root.dbl(); } }
     }
@@ -620,9 +629,13 @@ component HCell inherits Rectangle {
 }
 
 component HeaderLine inherits Rectangle {
+    in property <length> off: 0px;   // 一覧の横スクロール量に合わせて見出しも動かす
     height: 34px;
     background: Theme.head;
+    clip: true;
     HorizontalLayout {
+        x: root.off;
+        width: root.width;
         padding-left: 6px;
         spacing: 6px;
         for ci in Backend.vis-cols: HCell {
@@ -693,6 +706,10 @@ component Hist inherits Rectangle {
     property <LogRow> tip-row;
     property <length> tip-x: 0px;
     property <length> tip-y: 0px;
+    property <int> ht: Backend.hscroll-tick;
+    changed ht => {
+        hlv.content-x = max(min(0px, hlv.content-x - Backend.hscroll-dir * 80px), min(0px, hlv.visible-width - hlv.content-width));
+    }
     VerticalLayout {
         spacing: 6px;
         HorizontalLayout {
@@ -703,7 +720,7 @@ component Hist inherits Rectangle {
             Btn { small: true; tab-skip: true; label: "日時昇順"; selected: Backend.sort-asc; clicked => { Backend.sort(true); } }
             Btn { small: true; tab-skip: true; label: "日時降順"; selected: !Backend.sort-asc; clicked => { Backend.sort(false); } }
         }
-        HeaderLine { }
+        HeaderLine { off: hlv.content-x; }
         HorizontalLayout {
           vertical-stretch: 1;
           spacing: 4px;
@@ -1000,6 +1017,10 @@ component ListScreen inherits Rectangle {
     changed asc => { root.sel = -1; }
     changed q => { root.sel = -1; }
 
+    function hscroll(d: int) {
+        lv.content-x = max(min(0px, lv.content-x - d * 80px), min(0px, lv.visible-width - lv.content-width));
+    }
+
     function select(i: int) {
         let n = Backend.rows.length;
         if (n == 0) { return; }
@@ -1020,6 +1041,8 @@ component ListScreen inherits Rectangle {
         key-pressed(e) => {
             if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
             if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+            if (e.text == Key.LeftArrow) { root.hscroll(-1); return EventResult.accept; }
+            if (e.text == Key.RightArrow) { root.hscroll(1); return EventResult.accept; }
             if ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.DownArrow) { root.select(root.sel + 1); return EventResult.accept; }
             if (e.text == Key.Backtab || (e.text == Key.Tab && e.modifiers.shift) || e.text == Key.UpArrow) { root.select(root.sel - 1); return EventResult.accept; }
             if (e.text == Key.PageDown) { root.select(root.sel + 15); return EventResult.accept; }
@@ -1067,7 +1090,7 @@ component ListScreen inherits Rectangle {
                 }
             }
         }
-        HeaderLine { }
+        HeaderLine { off: lv.content-x; }
         HorizontalLayout {
           vertical-stretch: 1;
           spacing: 4px;
@@ -1300,6 +1323,11 @@ export component MainWindow inherits Window {
       capture-key-pressed(e) => {
         if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
         if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+        if (Backend.screen == 0 && !Backend.editing && e.modifiers.alt && (e.text == Key.LeftArrow || e.text == Key.RightArrow)) {
+            Backend.hscroll-dir = e.text == Key.LeftArrow ? -1 : 1;
+            Backend.hscroll-tick += 1;
+            return EventResult.accept;
+        }
         return EventResult.reject;
       }
       key-pressed(e) => {
