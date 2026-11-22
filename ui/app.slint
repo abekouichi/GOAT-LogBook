@@ -6,11 +6,13 @@ export struct Entry {
     date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
     freq: string, mode: string, power: string, name: string, qth: string, memo: string,
     loc: string, num: string, spec: string, gl: string, ngl: string, dist: string, bear: string,
+    color: string,
 }
 export struct LogRow {
     id: int, date: string, t-start: string, t-end: string, call: string, rst-s: string, rst-r: string,
     freq: string, mode: string, power: string, name: string, qth: string, memo: string, memo-full: string,
     loc: string, num: string, spec: string, gl: string, ngl: string, dist: string, bear: string,
+    color: string,
 }
 
 export global Form {
@@ -33,21 +35,22 @@ export global Form {
     in-out property <string> ngl;    // ネットで調べた相手局のGL
     in-out property <string> dist;   // 自局との距離
     in-out property <string> bear;   // 自局から見た方角
+    in-out property <string> color;  // 色（""=なし, red, yellow, green）
     public function get() -> Entry {
         return { date: date, t-start: t-start, t-end: t-end, call: call, rst-s: rst-s, rst-r: rst-r,
                  freq: freq, mode: mode, power: power, name: name, qth: qth, memo: memo,
-                 loc: loc, num: num, spec: spec, gl: gl, ngl: ngl, dist: dist, bear: bear };
+                 loc: loc, num: num, spec: spec, gl: gl, ngl: ngl, dist: dist, bear: bear, color: color };
     }
     public function put(e: Entry) {
         date = e.date; t-start = e.t-start; t-end = e.t-end; call = e.call; rst-s = e.rst-s; rst-r = e.rst-r;
         freq = e.freq; mode = e.mode; power = e.power; name = e.name; qth = e.qth; memo = e.memo;
-        loc = e.loc; num = e.num; spec = e.spec; gl = e.gl; ngl = e.ngl; dist = e.dist; bear = e.bear;
+        loc = e.loc; num = e.num; spec = e.spec; gl = e.gl; ngl = e.ngl; dist = e.dist; bear = e.bear; color = e.color;
     }
     public function set-info(l: string, n: string, s: string, g: string) { loc = l; num = n; spec = s; ngl = g; }
     public function clear() {
         date = ""; t-start = ""; t-end = ""; call = ""; rst-s = ""; rst-r = "";
         freq = ""; mode = ""; power = ""; name = ""; qth = ""; memo = "";
-        loc = ""; num = ""; spec = ""; gl = ""; ngl = ""; dist = ""; bear = "";
+        loc = ""; num = ""; spec = ""; gl = ""; ngl = ""; dist = ""; bear = ""; color = "";
     }
 }
 
@@ -66,6 +69,8 @@ export global Backend {
     in-out property <bool> show-seconds: true;
     in-out property <bool> show-popup: true;
     in-out property <bool> preview-open: false;
+    in-out property <bool> about-open: false;   // 「GOAT Logbookについて」を出す
+    in-out property <string> about-text;
     in-out property <bool> help-open: false;
     in-out property <string> help-title;
     in-out property <string> help-text;
@@ -107,6 +112,18 @@ export global Backend {
     callback save();
     callback edit-row(int);
     in-out property <bool> confirm-del: false;   // 削除の確認画面を出す
+    in-out property <int> del-id: -1;            // 一覧の右クリックから削除するときの記録の番号（-1 = 編集中の記録）
+    in-out property <int> ctx-id: -1;            // 右クリックメニューを出している記録の番号（-1 = 出していない）
+    in-out property <length> ctx-x: 0px;
+    in-out property <length> ctx-y: 0px;
+    callback row-color(int, int);                // 記録の番号, 色（0=リセット 1=赤 2=黄 3=緑）
+    callback row-delete(int);                    // 記録の番号（複数行を選んでいるときは、選んだ行すべて）
+    in-out property <[bool]> msel;               // リストの選択行
+    in-out property <int> sel-count: 0;          // 選んでいる行の数
+    callback sel-click(int, bool, bool);         // 行, Ctrl, Shift
+    callback sel-all();
+    callback color-toggle(string, string) -> string;   // 検索欄の文字, 色名（red yellow green none）→ 新しい検索欄の文字
+    pure callback color-on(string, string) -> bool;    // いま、その色で絞り込んでいるか
     callback edit-end(int);          // 0=保存して終了 1=保存せず終了 2=元に戻す 3=削除
     callback sort(bool);
     callback cols-changed();
@@ -183,12 +200,12 @@ export global Metrics {
 //           11=常置場所 12=市郡区ナンバー 13=一括表示 14=メモ 15=GL 16=検索GL 17=距離 18=方角
 export global Cols {
     out property <[string]> head: ["日付", "開始", "終了", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
-        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角", "色"];
     out property <[string]> name: ["日付", "開始時刻", "終了時刻", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
-        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+        "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角", "カラー"];
     // 等幅フォントで表示する項目
     out property <[bool]> mono: [true, true, true, true, true, true, true, true, true, false, false, false, true, true,
-        false, true, true, true, false];
+        false, true, true, true, false, false];
 }
 
 // ---- 入力欄 ------------------------------------------------------------
@@ -439,6 +456,7 @@ component MenuPanel inherits Rectangle {
     in property <[string]> items;
     in property <bool> call-input: false;
     in property <bool> footer: false;
+    in property <[bool]> dis;   // 実行できない（灰色にする）項目
     callback picked(int);
     callback save();
     callback cancel();
@@ -450,10 +468,10 @@ component MenuPanel inherits Rectangle {
     VerticalLayout {
         for it[i] in root.items: Rectangle {
             height: 28px;
-            background: mta.has-hover && it != "" ? Theme.hover : transparent;
+            background: mta.has-hover && it != "" && !root.dis[i] ? Theme.hover : transparent;
             if it == "": Rectangle { y: 13px; height: 1px; background: Theme.sep; }
-            if it != "": Text { x: 10px; text: it; font-size: 14px; color: Theme.text; vertical-alignment: center; }
-            mta := TouchArea { clicked => { root.picked(i); } }
+            if it != "": Text { x: 10px; text: it; font-size: 14px; color: root.dis[i] ? #9a9a9a : Theme.text; vertical-alignment: center; }
+            mta := TouchArea { clicked => { if (!root.dis[i]) { root.picked(i); } } }
         }
         if root.call-input: Rectangle {
             height: 48px;
@@ -565,6 +583,31 @@ component Cell inherits Text {
     min-width: 0px;
 }
 
+// 色の表示（赤・黄・緑）
+component ColorDot inherits Rectangle {
+    in property <string> value;
+    width: 16px;
+    Rectangle {
+        width: 10px; height: 10px; border-radius: 2px;
+        background: root.value == "red" ? #e05252 : root.value == "yellow" ? #e8c63a : root.value == "green" ? #4caf62 : transparent;
+    }
+}
+
+// 色の選択（入力・編集の終了時刻の右）。クリックで選ぶ。選んでいる色は枠が太い
+component ColorPick inherits HorizontalLayout {
+    spacing: 6px;
+    alignment: start;
+    for v[i] in ["", "red", "yellow", "green"]: Rectangle {
+        width: 34px; height: 34px;
+        border-radius: 4px;
+        background: v == "red" ? #e05252 : v == "yellow" ? #e8c63a : v == "green" ? #4caf62 : Theme.bg;
+        border-width: Form.color == v ? 3px : 1px;
+        border-color: Form.color == v ? Theme.text : Theme.pop-border;
+        if v == "": Text { text: "なし"; font-size: 12px; color: Theme.text2; horizontal-alignment: center; vertical-alignment: center; }
+        TouchArea { clicked => { Form.color = v; } }
+    }
+}
+
 component RowLine inherits Rectangle {
     in property <LogRow> r;
     in property <bool> header: false;
@@ -573,12 +616,14 @@ component RowLine inherits Rectangle {
     in property <bool> selected: false;
     callback dbl();
     callback clicked();
+    callback context(length, length);   // 右クリックした位置（ウィンドウ内）
+    callback mod-clicked(bool, bool);   // 左クリック（Ctrl, Shift）
     height: 34px;
     // 背景は下のRectangleで描く（横スクロールで右へ行っても途切れないよう、列の合計幅まで伸ばす）
     // 項目番号 → 表示する文字
     property <[string]> cells: [root.r.date, root.r.t-start, root.r.t-end, root.r.call, root.r.rst-s, root.r.rst-r,
         root.r.freq, root.r.mode, root.r.power, root.r.name, root.r.qth, root.r.loc, root.r.num, root.r.spec, root.r.memo,
-        root.r.gl, root.r.ngl, root.r.dist, root.r.bear];
+        root.r.gl, root.r.ngl, root.r.dist, root.r.bear, ""];
     Rectangle {
         x: 0px; y: 0px;
         width: max(root.width, rowlay.min-width);
@@ -588,20 +633,32 @@ component RowLine inherits Rectangle {
     rowlay := HorizontalLayout {
         padding-left: 6px;
         spacing: 6px;
-        for ci in Backend.vis-cols: Cell {
-            preferred-width: Backend.col-w[ci];
-            min-width: ci == 14 ? 40px : Backend.col-w[ci];
-            horizontal-stretch: ci == 14 ? 1 : 0;
-            text: root.cells[ci];
-            font-family: Cols.mono[ci] ? Metrics.mono-font : "";
-            font-size: Cols.mono[ci] ? 19.8px : 18px;   // 等幅フォントは1.1倍
+        for ci in Backend.vis-cols: Rectangle {
+            preferred-width: Backend.col-w[ci];   // 列の幅は固定（メモも、見出しのドラッグで変える。既定は半角70文字分）
+            min-width: Backend.col-w[ci];
+            horizontal-stretch: 0;
+            if ci == 19: ColorDot { x: (parent.width - self.width) / 2; height: parent.height; value: root.r.color; }   // カラー（赤・黄・緑）
+            if ci != 19: Cell {
+                width: parent.width; height: parent.height;
+                text: root.cells[ci];
+                font-family: Cols.mono[ci] ? Metrics.mono-font : "";
+                font-size: Cols.mono[ci] ? 19.8px : 18px;   // 等幅フォントは1.1倍
+            }
         }
-        if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
+        Rectangle { horizontal-stretch: 1; }
     }
     rta := TouchArea {
         width: max(root.width, rowlay.min-width);
         clicked => { root.clicked(); }
         double-clicked => { if (!root.header) { root.dbl(); } }
+        pointer-event(e) => {
+            if (!root.header && e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                root.mod-clicked(e.modifiers.control, e.modifiers.shift);
+            }
+            if (!root.header && e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
     out property <length> mx: rta.mouse-x;
     callback hovered(bool);
@@ -614,7 +671,7 @@ component HCell inherits Rectangle {
     in property <int> c;                 // 項目番号
     in property <bool> resizable: true;
     preferred-width: Backend.col-w[root.c];
-    min-width: root.c == 14 ? 40px : Backend.col-w[root.c];   // メモ以外は幅を固定（見出しと各行の位置がずれないように）
+    min-width: Backend.col-w[root.c];   // 幅は固定（見出しと各行の位置がずれないように）。変えるのは、見出しの右端のドラッグだけ
     horizontal-stretch: 0;
     Text { x: 0px; width: parent.width - 8px; text: root.label; font-size: 18px; color: Theme.text; vertical-alignment: center; overflow: elide; }
     Rectangle { x: parent.width - 1px; width: 1px; background: Theme.head-line; }
@@ -640,11 +697,11 @@ component HeaderLine inherits Rectangle {
         spacing: 6px;
         for ci in Backend.vis-cols: HCell {
             c: ci;
+            resizable: ci != 19;   // カラーの列は、幅を変えない
             label: Cols.head[ci];
-            resizable: ci != 14;
-            horizontal-stretch: ci == 14 ? 1 : 0;
+            horizontal-stretch: 0;
         }
-        if !Backend.col-show[14]: Rectangle { horizontal-stretch: 1; }
+        Rectangle { horizontal-stretch: 1; }
     }
 }
 
@@ -710,6 +767,15 @@ component Hist inherits Rectangle {
     changed ht => {
         hlv.content-x = max(min(0px, hlv.content-x - Backend.hscroll-dir * 80px), min(0px, hlv.visible-width - hlv.content-width));
     }
+    // 履歴の行をクリックすると、←→ で左右にスクロールできる（入力欄にいるときは、Alt+←/→）
+    hist-fs := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(e) => {
+            if (e.text == Key.LeftArrow) { hlv.content-x = max(min(0px, hlv.content-x + 80px), min(0px, hlv.visible-width - hlv.content-width)); return EventResult.accept; }
+            if (e.text == Key.RightArrow) { hlv.content-x = max(min(0px, hlv.content-x - 80px), min(0px, hlv.visible-width - hlv.content-width)); return EventResult.accept; }
+            return EventResult.reject;
+        }
+    }
     VerticalLayout {
         spacing: 6px;
         HorizontalLayout {
@@ -728,6 +794,7 @@ component Hist inherits Rectangle {
             horizontal-stretch: 1;
             for x[i] in Backend.history: RowLine {
                 r: x;
+                clicked => { hist-fs.focus(); }
                 shade: Math.mod(i, 2) == 1;
                 tooltip: true;
                 hovered(on) => {
@@ -938,6 +1005,10 @@ component InputScreen inherits Rectangle {
                     focus-gained => { if (Form.t-end == "") { Form.t-end = Backend.now(1); } self.cursor-end(); }
                 }
             }
+            FieldLabel {
+                label: "カラー"; preferred-width: 34px * 4 + 6px * 3;
+                ColorPick { }
+            }
             Rectangle { horizontal-stretch: 1; }
             VerticalLayout {
                 alignment: end;
@@ -1014,6 +1085,8 @@ component ListScreen inherits Rectangle {
     property <string> q: Backend.query;
     property <int> ftick: Backend.focus-tick;
     changed ftick => { list-fs.focus(); }
+    property <int> ht: Backend.hscroll-tick;
+    changed ht => { root.hscroll(Backend.hscroll-dir); }
     changed asc => { root.sel = -1; }
     changed q => { root.sel = -1; }
 
@@ -1025,6 +1098,7 @@ component ListScreen inherits Rectangle {
         let n = Backend.rows.length;
         if (n == 0) { return; }
         root.sel = i < 0 ? 0 : (i > n - 1 ? n - 1 : i);
+        Backend.sel-click(root.sel, false, false);
         if (root.sel * 34px < -lv.content-y) { lv.content-y = -root.sel * 34px; }
         if ((root.sel + 1) * 34px > -lv.content-y + lv.height) { lv.content-y = -((root.sel + 1) * 34px - lv.height); }
     }
@@ -1041,6 +1115,7 @@ component ListScreen inherits Rectangle {
         key-pressed(e) => {
             if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
             if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
+            if ((e.text == "a" || e.text == "A" || e.text == "\u{1}") && e.modifiers.control) { Backend.sel-all(); return EventResult.accept; }
             if (e.text == Key.LeftArrow) { root.hscroll(-1); return EventResult.accept; }
             if (e.text == Key.RightArrow) { root.hscroll(1); return EventResult.accept; }
             if ((e.text == Key.Tab && !e.modifiers.shift) || e.text == Key.DownArrow) { root.select(root.sel + 1); return EventResult.accept; }
@@ -1075,6 +1150,35 @@ component ListScreen inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
             FieldLabel {
+                label: "カラーで絞り込み"; preferred-width: 4px * 3 + 36px * 4 + 16px * 4;
+                Rectangle {
+                    height: 36px;
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 4px;
+                        for cc[i] in ["red", "yellow", "green"]: HorizontalLayout {
+                            spacing: 2px;
+                            ColorDot { width: 14px; value: cc; }
+                            VerticalLayout { alignment: center; Btn {
+                                small: true; tab-skip: true; width: 36px;
+                                label: i == 0 ? "赤" : i == 1 ? "黄" : "緑";
+                                selected: Backend.color-on(Backend.query, cc);
+                                clicked => { sb.text = Backend.color-toggle(Backend.query, cc); Backend.search(sb.text); }
+                            } }
+                        }
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Rectangle { width: 14px; }   // 各色の印と同じ幅（ボタンの間隔をそろえる）
+                            VerticalLayout { alignment: center; Btn {
+                                small: true; tab-skip: true; width: 36px; label: "なし";
+                                selected: Backend.color-on(Backend.query, "none");
+                                clicked => { sb.text = Backend.color-toggle(Backend.query, "none"); Backend.search(sb.text); }
+                            } }
+                        }
+                    }
+                }
+            }
+            FieldLabel {
                 label: "検索"; preferred-width: Metrics.cw * 50 + 22px + 90px + 130px;
                 HorizontalLayout {
                     spacing: 8px;
@@ -1099,10 +1203,11 @@ component ListScreen inherits Rectangle {
             for x[i] in Backend.rows: RowLine {
                 r: x;
                 shade: Math.mod(i, 2) == 1;
-                selected: root.sel == i;
+                selected: Backend.msel[i];
                 tooltip: true;
-                clicked => { root.select(i); list-fs.focus(); }
+                mod-clicked(ctrl, shift) => { root.sel = i; Backend.sel-click(i, ctrl, shift); list-fs.focus(); }
                 dbl => { Backend.edit-row(x.id); }
+                context(cx, cy) => { root.sel = i; if (!Backend.msel[i]) { Backend.sel-click(i, false, false); } list-fs.focus(); Backend.ctx-x = cx; Backend.ctx-y = cy; Backend.ctx-id = x.id; }
                 hovered(on) => {
                     if (on) {
                         root.tip-row = x;
@@ -1240,6 +1345,54 @@ component PreviewScreen inherits Rectangle {
     }
 }
 
+// 「GOAT Logbookについて」（全体を覆う）。Esc・Enter・OK で閉じる。「コピー」で、内容をクリップボードへ
+component AboutDialog inherits Rectangle {
+    background: #00000080;
+    TouchArea { }
+    init => { afs.focus(); }
+    afs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape || e.text == Key.Return) { Backend.about-open = false; return EventResult.accept; }
+            return EventResult.reject;
+        }
+    }
+    Rectangle {
+        width: min(500px, parent.width - 40px);
+        height: 380px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.pop-bg;
+        border-width: 1px;
+        border-color: Theme.pop-border;
+        VerticalLayout {
+            padding: 24px;
+            spacing: 18px;
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 38px; height: 38px; border-radius: 19px; background: #1e7fe0;
+                    Text { text: "i"; color: white; font-size: 24px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Text { text: "GOAT LOGBOOK"; font-size: 26px; color: #1e6fc8; vertical-alignment: center; }
+            }
+            ti := TextInput {
+                read-only: true;
+                text: Backend.about-text;
+                font-size: 16px;
+                color: Theme.text;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Btn { label: "コピー"; tab-skip: true; clicked => { ti.select-all(); ti.copy(); afs.focus(); } }
+                Btn { label: "OK"; tab-skip: true; clicked => { Backend.about-open = false; } }
+            }
+        }
+    }
+}
+
 // 確認画面（全体を覆う）。初めは「キャンセル」にフォーカスがあり、Esc でも取り消せる
 component ConfirmDialog inherits Rectangle {
     in property <string> message;
@@ -1323,7 +1476,7 @@ export component MainWindow inherits Window {
       capture-key-pressed(e) => {
         if (e.text == Key.F11) { Backend.goto(0); return EventResult.accept; }
         if (e.text == Key.F12) { Backend.goto(1); return EventResult.accept; }
-        if (Backend.screen == 0 && !Backend.editing && e.modifiers.alt && (e.text == Key.LeftArrow || e.text == Key.RightArrow)) {
+        if (((Backend.screen == 0 && !Backend.editing) || Backend.screen == 1) && e.modifiers.alt && (e.text == Key.LeftArrow || e.text == Key.RightArrow)) {
             Backend.hscroll-dir = e.text == Key.LeftArrow ? -1 : 1;
             Backend.hscroll-tick += 1;
             return EventResult.accept;
@@ -1395,13 +1548,17 @@ export component MainWindow inherits Window {
     }
     if root.open-menu == 0: MenuPanel {
         x: mh0.absolute-position.x; y: 30px;
-        items: ["ファイルを開く…", "ファイルを新規作成…", "名前を付けて保存…", "ファイルを閉じる", "PDF出力…", "", "アプリの終了"];
+        items: ["ファイルを開く…", "ファイルを新規作成…", "名前を付けて保存…", "ファイルを閉じる", "PDF出力…", "", "ADIFインポート…", "ADIFエクスポート…", "", "アプリの終了"];
         picked(i) => { root.open-menu = -1; Backend.menu(0, i); }
     }
     if root.open-menu == 4: MenuPanel {
         x: mh4.absolute-position.x; y: 30px;
-        items: ["FAQ", "取扱説明書", "ライセンス（MIT）"];
-        picked(i) => { root.open-menu = -1; Backend.show-help(i); }
+        items: ["GOAT Logbookについて", "", "FAQ", "取扱説明書", "ライセンス（MIT）"];
+        picked(i) => {
+            root.open-menu = -1;
+            if (i == 0) { Backend.about-open = true; }
+            if (i >= 2) { Backend.show-help(i - 2); }
+        }
     }
     if root.open-menu == 1: MenuPanel {
         x: mh1.absolute-position.x; y: 30px;
@@ -1436,18 +1593,43 @@ export component MainWindow inherits Window {
         cancel => { root.open-menu = -1; }
     }
 
+    // 一覧の右クリックメニュー（編集・削除・カラー）
+    if Backend.ctx-id >= 0: TouchArea {
+        x: 0px; y: 30px; width: parent.width; height: parent.height - 30px;
+        pointer-event(e) => { if (e.kind == PointerEventKind.down) { Backend.ctx-id = -1; } }
+    }
+    if Backend.ctx-id >= 0: MenuPanel {
+        x: max(0px, min(Backend.ctx-x, parent.width - self.width));
+        y: max(30px, min(Backend.ctx-y, parent.height - self.height));
+        items: ["編集", Backend.sel-count > 1 ? "削除（\{Backend.sel-count}件）" : "削除", "", "カラー：リセット", "カラー：赤", "カラー：黄", "カラー：緑"];
+        dis: [Backend.sel-count > 1, false, false, false, false, false, false];   // 複数行を選んでいるときは、編集はできない
+        picked(i) => {
+            if (i == 0) { Backend.edit-row(Backend.ctx-id); }
+            if (i == 1) { Backend.del-id = Backend.ctx-id; Backend.confirm-del = true; }
+            if (i >= 3) { Backend.row-color(Backend.ctx-id, i - 3); }
+            if (i != 2) { Backend.ctx-id = -1; }
+        }
+    }
+
     // 印刷プレビュー（全体を覆う）
     if Backend.preview-open: PreviewScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
 
     // ヘルプ（全体を覆う）
     if Backend.help-open: HelpScreen { x: 0px; y: 0px; width: parent.width; height: parent.height; }
 
+    // 「GOAT Logbookについて」（全体を覆う）
+    if Backend.about-open: AboutDialog { x: 0px; y: 0px; width: parent.width; height: parent.height; }
+
     // 削除の確認（全体を覆う）
     if Backend.confirm-del: ConfirmDialog {
         x: 0px; y: 0px; width: parent.width; height: parent.height;
-        message: "この記録を削除します。削除すると元に戻せません。よろしいですか？";
+        message: (Backend.del-id >= 0 && Backend.sel-count > 1) ? "選んだ \{Backend.sel-count} 件の記録を削除します。削除すると元に戻せません。よろしいですか？" : "この記録を削除します。削除すると元に戻せません。よろしいですか？";
         ok-label: "削除する";
-        ok => { Backend.confirm-del = false; Backend.edit-end(3); }
-        cancel => { Backend.confirm-del = false; }
+        ok => {
+            Backend.confirm-del = false;
+            if (Backend.del-id >= 0) { Backend.row-delete(Backend.del-id); Backend.del-id = -1; }
+            else { Backend.edit-end(3); }
+        }
+        cancel => { Backend.confirm-del = false; Backend.del-id = -1; }
     }
 }

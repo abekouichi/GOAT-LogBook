@@ -4,8 +4,8 @@ use chrono::{Local, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::{
-    cell::RefCell,
-    collections::HashMap,
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     io::Read,
@@ -25,14 +25,14 @@ const FREQS: [&str; 17] = ["1.9MHz", "3.5MHz", "3.8MHz", "7MHz", "10MHz", "14MHz
 const MODES: [&str; 7] = ["CW", "SSB", "AM", "FM", "FT8", "RTTY", "SSTV"];
 const POWERS: [&str; 7] = ["1W", "5W", "10W", "50W", "100W", "200W", "1kW"];
 // {callsign} が呼出符号に置換されます。既存コードのURLがある場合は setting.json の api_url で上書きしてください。
-const NCOL: usize = 19;
+const NCOL: usize = 20;   // 0〜18は従来の項目、19は「カラー」
 /// 一覧・PDFの項目名（番号＝項目番号。0〜14は従来どおり、15〜18が新しい項目）
 const COL_HEADS: [&str; NCOL] = ["日付", "開始時刻", "終了時刻", "コールサイン", "RST(S)", "RST(R)", "周波数", "モード", "出力",
-                                 "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角"];
+                                 "名前", "QTH", "常置場所", "市郡区ナンバー", "一括表示", "メモ", "GL", "検索GL", "距離", "方角", "カラー"];
 /// 既定の表示順（左から）
-const DEF_ORDER: [usize; NCOL] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 14];
-/// 既定の列幅[px]
-const DEF_WIDTHS: [f32; NCOL] = [130.0, 70.0, 70.0, 130.0, 60.0, 60.0, 84.0, 62.0, 68.0, 124.0, 170.0, 170.0, 110.0, 170.0, 240.0, 90.0, 90.0, 110.0, 130.0];
+const DEF_ORDER: [usize; NCOL] = [19, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 14];
+/// 既定の列幅[px]（メモは、半角70文字分）
+const DEF_WIDTHS: [f32; NCOL] = [130.0, 70.0, 70.0, 130.0, 60.0, 60.0, 84.0, 62.0, 68.0, 124.0, 170.0, 170.0, 110.0, 170.0, 840.0, 90.0, 90.0, 110.0, 130.0, 28.0];
 /// 等幅フォントで表示する項目（日付・時刻・コールサイン・RST・周波数・モード・出力・市郡区ナンバー・一括表示・GL・検索GL・距離）
 fn is_mono_col(c: usize) -> bool { matches!(c, 0..=8 | 12 | 13 | 15 | 16 | 17) }
 const PREFS: [&str; 47] = ["北海道", "青森県", "岩手県", "秋田県", "山形県", "宮城県", "福島県", "新潟県", "長野県", "東京都", "神奈川県", "千葉県",
@@ -65,6 +65,7 @@ struct Record {
     #[serde(rename = "検索GL", default)] ngl: String,
     #[serde(rename = "距離", default)] dist: String,
     #[serde(rename = "方角", default)] bear: String,
+    #[serde(rename = "色", default, skip_serializing_if = "String::is_empty")] color: String,   // red / yellow / green（なしは空）
 }
 
 impl From<Entry> for Record {
@@ -76,6 +77,7 @@ impl From<Entry> for Record {
             name: e.name.to_string(), qth: e.qth.to_string(), memo: e.memo.to_string(),
             loc: e.loc.to_string(), num: e.num.to_string(), spec: e.spec.to_string(),
             gl: e.gl.to_string(), ngl: e.ngl.to_string(), dist: e.dist.to_string(), bear: e.bear.to_string(),
+            color: e.color.to_string(),
         }
     }
 }
@@ -89,6 +91,7 @@ impl From<&Record> for Entry {
             name: r.name.as_str().into(), qth: r.qth.as_str().into(), memo: r.memo.as_str().into(),
             loc: r.loc.as_str().into(), num: r.num.as_str().into(), spec: r.spec.as_str().into(),
             gl: r.gl.as_str().into(), ngl: r.ngl.as_str().into(), dist: r.dist.as_str().into(), bear: r.bear.as_str().into(),
+            color: r.color.as_str().into(),
         }
     }
 }
@@ -150,6 +153,9 @@ struct App {
     query: String,
     doc: Option<Doc>,       // PDF出力画面のデータ
     fonts: Option<Arc<Fonts>>, // PDFに使うフォント（読み込み済み）
+    msel: Rc<VecModel<bool>>,  // リストの選択行（行の順。画面と共有）
+    list_ids: RefCell<Vec<usize>>, // リストの行 → 記録の番号
+    anchor: Cell<usize>,       // シフト＋クリックの起点の行
 }
 type Shared = Rc<RefCell<App>>;
 
@@ -175,6 +181,9 @@ fn persist(s: &App) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("保存エラー: {e}"))
 }
 
+/// ログファイルを開いていないとき（ADIFを取り込んだだけのとき）は、保存せずに成功として扱う
+fn persist_opt(s: &App) -> Result<(), String> { if s.file.is_none() { Ok(()) } else { persist(s) } }
+
 // ---------------------------------------------------------------- 表示用ヘルパ
 fn base(call: &str) -> String { call.split('/').next().unwrap_or("").to_uppercase() }
 
@@ -187,6 +196,7 @@ fn log_row(i: usize, r: &Record) -> LogRow {
         memo_full: r.memo.as_str().into(),
         loc: r.loc.as_str().into(), num: r.num.as_str().into(), spec: r.spec.as_str().into(),
         gl: r.gl.as_str().into(), ngl: r.ngl.as_str().into(), dist: r.dist.as_str().into(), bear: r.bear.as_str().into(),
+        color: r.color.as_str().into(),
     }
 }
 
@@ -200,12 +210,54 @@ fn digits(s: &str) -> String { s.chars().filter(|c| c.is_ascii_digit()).collect(
 fn dateish(s: &str) -> bool { s.chars().all(|c| c.is_ascii_digit() || c == '/') }
 
 /// スペース区切りAND検索。「日付A-」「-日付B」「日付A-日付B」で日付範囲。
+/// 検索語のカラー指定（「色:赤」「色:赤,黄」「色:なし」。英語の color:red / none も可）。
+/// 戻り値は、色の集合（"red" "yellow" "green" "none"）。カラー指定でなければ None
+fn color_tok(tok: &str) -> Option<Vec<&'static str>> {
+    let low = tok.to_lowercase();
+    let rest = low.strip_prefix("色:").or_else(|| low.strip_prefix("色：")).or_else(|| low.strip_prefix("color:"))?;
+    let mut v = vec![];
+    for x in rest.split(|c| c == ',' || c == '、' || c == '，') {
+        let c = match x.trim() { "赤" | "red" => "red", "黄" | "yellow" => "yellow", "緑" | "green" => "green", "なし" | "無" | "none" => "none", _ => return None };
+        if !v.contains(&c) { v.push(c); }
+    }
+    if v.is_empty() { None } else { Some(v) }
+}
+
+const COLOR_NAMES: [(&str, &str); 4] = [("red", "赤"), ("yellow", "黄"), ("green", "緑"), ("none", "なし")];
+
+/// 検索欄の文字に、カラーの絞り込みを入れたり外したりする（ボタン用）
+fn color_toggle(text: &str, name: &str) -> String {
+    let mut toks: Vec<String> = text.split_whitespace().map(String::from).collect();
+    if let Some(pos) = toks.iter().position(|t| color_tok(t).is_some()) {
+        let mut set = color_tok(&toks[pos]).unwrap_or_default();
+        if let Some(i) = set.iter().position(|c| *c == name) { set.remove(i); }
+        else if let Some(c) = COLOR_NAMES.iter().find(|c| c.0 == name) { set.push(c.0); }
+        if set.is_empty() { toks.remove(pos); }
+        else {
+            let names: Vec<&str> = COLOR_NAMES.iter().filter(|c| set.contains(&c.0)).map(|c| c.1).collect();
+            toks[pos] = format!("色:{}", names.join(","));
+        }
+    } else if let Some(c) = COLOR_NAMES.iter().find(|c| c.0 == name) {
+        toks.push(format!("色:{}", c.1));
+    }
+    toks.join(" ")
+}
+
+fn color_on(text: &str, name: &str) -> bool {
+    text.split_whitespace().find_map(color_tok).map_or(false, |set| set.contains(&name))
+}
+
 fn hit(r: &Record, q: &str) -> bool {
     let hay = [&r.date, &r.start, &r.end, &r.call, &r.rst_s, &r.rst_r, &r.freq, &r.mode, &r.power,
                &r.name, &r.qth, &r.memo, &r.loc, &r.num, &r.spec, &r.gl, &r.ngl, &r.dist, &r.bear]
         .iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ").to_uppercase();
     let dd = digits(&r.date);
     for tok in q.split_whitespace() {
+        if let Some(set) = color_tok(tok) {   // カラー（複数の色は「または」）
+            let c = if r.color.is_empty() { "none" } else { r.color.as_str() };
+            if !set.contains(&c) { return false; }
+            continue;
+        }
         if let Some((a, b)) = tok.split_once('-') {
             if dateish(a) && dateish(b) && !(a.is_empty() && b.is_empty()) {
                 let (a, b) = (digits(a), digits(b));
@@ -221,12 +273,32 @@ fn hit(r: &Record, q: &str) -> bool {
 
 fn to_model(rows: Vec<LogRow>) -> ModelRc<LogRow> { ModelRc::new(VecModel::from(rows)) }
 
-fn refresh_list(ui: &MainWindow, s: &App) {
+fn refresh_list(ui: &MainWindow, s: &App) { refresh_list_keep(ui, s, &HashSet::new()); }
+
+/// リストを作り直す。keep に入っている記録の番号の行は、選択したままにする
+fn refresh_list_keep(ui: &MainWindow, s: &App, keep: &HashSet<usize>) {
     let idx = (0..s.recs.len()).filter(|&i| hit(&s.recs[i], &s.query)).collect();
-    let rows = sorted(&s.recs, idx, s.list_asc).into_iter().map(|i| log_row(i, &s.recs[i])).collect();
+    let ids = sorted(&s.recs, idx, s.list_asc);
+    let rows = ids.iter().map(|&i| log_row(i, &s.recs[i])).collect();
+    let flags: Vec<bool> = ids.iter().map(|i| keep.contains(i)).collect();
+    let n = flags.iter().filter(|&&f| f).count();
+    *s.list_ids.borrow_mut() = ids;
+    s.msel.set_vec(flags);
     let bk = ui.global::<Backend>();
     bk.set_rows(to_model(rows));
     bk.set_total_count(s.recs.len() as i32);
+    bk.set_sel_count(n as i32);
+}
+
+/// 選んでいる行の、記録の番号
+fn sel_ids(s: &App) -> Vec<usize> {
+    let ids = s.list_ids.borrow();
+    (0..s.msel.row_count()).filter(|&k| s.msel.row_data(k) == Some(true)).filter_map(|k| ids.get(k).copied()).collect()
+}
+
+fn sel_sync(ui: &MainWindow, s: &App) {
+    let n = (0..s.msel.row_count()).filter(|&k| s.msel.row_data(k) == Some(true)).count();
+    ui.global::<Backend>().set_sel_count(n as i32);
 }
 
 fn refresh_hist(ui: &MainWindow, s: &App) {
@@ -253,12 +325,12 @@ fn margins_of(cfg: &Config) -> [i32; 4] {
     if cfg.margins.len() == 4 { [cfg.margins[0], cfg.margins[1], cfg.margins[2], cfg.margins[3]] } else { [10; 4] }
 }
 
-/// リスト・履歴の表示項目（19個）。未設定なら全部表示
+/// リスト・履歴の表示項目（20個）。未設定なら全部表示。19個（カラーが無い形式）は、カラーを表示にして移行
 /// 旧形式（15個）は、新しい4項目（GL・検索GL・距離・方角）を表示にして移行。
 /// さらに古い形式（12個：メモが最後）は、QTHの後ろに常置場所・市郡区ナンバー・一括表示（表示）を挿入して移行
 fn col_flags(cfg: &Config) -> Vec<bool> {
-    match cfg.col_show.len() {
-        19 => cfg.col_show.clone(),
+    let mut v = match cfg.col_show.len() {
+        20 | 19 => cfg.col_show.clone(),
         15 => { let mut v = cfg.col_show.clone(); v.extend([true; 4]); v }
         12 => {
             let mut v = cfg.col_show[..11].to_vec();
@@ -267,14 +339,18 @@ fn col_flags(cfg: &Config) -> Vec<bool> {
             v.extend([true; 4]);
             v
         }
-        _ => vec![true; NCOL],
-    }
+        _ => return vec![true; NCOL],
+    };
+    if v.len() == NCOL - 1 { v.push(true); }   // カラー
+    v
 }
 
 /// 一覧・履歴の表示順（項目番号を左から並べたもの）。正しくなければ既定の順
 fn col_order(cfg: &Config) -> Vec<usize> {
-    let o = &cfg.col_order;
-    if is_perm(o) { o.clone() } else { DEF_ORDER.to_vec() }
+    let mut o = cfg.col_order.clone();
+    // カラーが無い形式（19個）は、カラーを左端に足して移行する
+    if o.len() == NCOL - 1 && o.iter().all(|&c| c < NCOL - 1) { o.insert(0, NCOL - 1); }
+    if is_perm(&o) { o } else { DEF_ORDER.to_vec() }
 }
 
 fn is_perm(o: &[usize]) -> bool {
@@ -291,7 +367,7 @@ fn is_perm(o: &[usize]) -> bool {
 fn col_widths(cfg: &Config) -> Vec<f32> {
     let mut w = DEF_WIDTHS.to_vec();
     let c = &cfg.cols;
-    if c.len() == 11 || c.len() == 14 || c.len() == NCOL {
+    if c.len() == 11 || c.len() == 14 || c.len() == NCOL - 1 || c.len() == NCOL {
         for (i, x) in c.iter().enumerate() { w[i] = x.max(30.0); }
     }
     w
@@ -993,7 +1069,7 @@ fn build_job(s: &App) -> Result<PrintJob, String> {
     if idx.is_empty() { return Err("PDFにするデータがありません".into()); }
     let flags = col_flags(&s.cfg);
     let heads = COL_HEADS;
-    let cols: Vec<usize> = col_order(&s.cfg).into_iter().filter(|&c| flags[c]).collect(); // 設定した表示順（左から）
+    let cols: Vec<usize> = col_order(&s.cfg).into_iter().filter(|&c| flags[c] && c != NCOL - 1).collect(); // 設定した表示順（左から）。カラーはPDFに出さない
     if cols.is_empty() { return Err("表示する項目がありません。設定で表示項目を選んでください".into()); }
     let cell = |r: &Record, c: usize| -> String {
         match c {
@@ -1501,6 +1577,318 @@ fn fit_to_screen(ui: &MainWindow) {
 }
 
 // ---------------------------------------------------------------- main
+// ---------------------------------------------------------------- ADIF（.adi）のインポート・エクスポート
+/// ADIFの日付・時刻はUTCと決められています。true なら、エクスポートでパソコンの時刻からUTCに直し、
+/// インポートでUTCからパソコンの時刻に直します（ログの日付・時刻が最初からUTCなら false にしてください）
+const ADIF_UTC: bool = true;
+
+/// ADIFのバンド（名前, 下限MHz, 上限MHz）
+const ADIF_BANDS: &[(&str, f64, f64)] = &[
+    ("160m", 1.8, 2.0), ("80m", 3.5, 4.0), ("60m", 5.06, 5.45), ("40m", 7.0, 7.3), ("30m", 10.0, 10.15),
+    ("20m", 14.0, 14.35), ("17m", 18.0, 18.2), ("15m", 21.0, 21.45), ("12m", 24.0, 25.0), ("10m", 28.0, 29.7),
+    ("6m", 50.0, 54.0), ("2m", 144.0, 148.0), ("70cm", 420.0, 450.0), ("23cm", 1200.0, 1300.0),
+    ("13cm", 2300.0, 2450.0), ("6cm", 5600.0, 5925.0), ("3cm", 10000.0, 10500.0),
+];
+/// インポートで、周波数（MHz）をこのアプリの周波数（FREQS）に当てはめる範囲
+const APP_FREQS: &[(f64, f64, &str)] = &[
+    (1.8, 2.0, "1.9MHz"), (3.5, 3.7, "3.5MHz"), (3.7, 4.0, "3.8MHz"), (7.0, 7.3, "7MHz"), (10.0, 10.15, "10MHz"),
+    (14.0, 14.35, "14MHz"), (18.0, 18.2, "18MHz"), (21.0, 21.45, "21MHz"), (24.0, 25.0, "24MHz"), (28.0, 29.7, "28MHz"),
+    (50.0, 54.0, "50MHz"), (144.0, 148.0, "144MHz"), (420.0, 450.0, "430MHz"), (1200.0, 1300.0, "1200MHz"),
+    (2300.0, 2450.0, "2400MHz"), (5600.0, 5925.0, "5600MHz"), (10000.0, 10500.0, "10.1GHz"),
+];
+
+fn fmt_num(f: f64) -> String { format!("{}", (f * 1e6).round() / 1e6) }
+
+/// 「7MHz」「10.1GHz」「144」などから、MHz の数値を取り出す（単位がなければ MHz）
+fn parse_freq_mhz(s: &str) -> Option<f64> {
+    let t = s.trim().to_lowercase();
+    let (num, mul) = if let Some(x) = t.strip_suffix("ghz") { (x, 1000.0) }
+        else if let Some(x) = t.strip_suffix("mhz") { (x, 1.0) }
+        else if let Some(x) = t.strip_suffix("khz") { (x, 0.001) }
+        else { (t.as_str(), 1.0) };
+    num.trim().parse::<f64>().ok().filter(|v| *v > 0.0).map(|v| v * mul)
+}
+
+fn adif_band(mhz: f64) -> Option<&'static str> {
+    ADIF_BANDS.iter().find(|b| mhz >= b.1 && mhz <= b.2).map(|b| b.0)
+}
+
+fn app_freq(mhz: f64) -> Option<&'static str> {
+    APP_FREQS.iter().find(|b| mhz >= b.0 && mhz <= b.1).map(|b| b.2)
+}
+
+fn band_to_app(band: &str) -> Option<&'static str> {
+    let b = band.trim().to_lowercase();
+    ADIF_BANDS.iter().find(|x| x.0 == b).and_then(|x| app_freq(x.1))
+}
+
+fn fmt_freq(mhz: f64) -> String {
+    if mhz >= 1000.0 { format!("{}GHz", fmt_num(mhz / 1000.0)) } else { format!("{}MHz", fmt_num(mhz)) }
+}
+
+/// 「10W」「1kW」から、ワットの数値を取り出す
+fn power_to_w(s: &str) -> Option<f64> {
+    let t = s.trim().to_lowercase();
+    let (num, mul) = if let Some(x) = t.strip_suffix("kw") { (x, 1000.0) }
+        else if let Some(x) = t.strip_suffix('w') { (x, 1.0) }
+        else { (t.as_str(), 1.0) };
+    num.trim().parse::<f64>().ok().filter(|v| *v > 0.0).map(|v| v * mul)
+}
+
+fn power_from_w(s: &str) -> String {
+    match s.trim().parse::<f64>() {
+        Ok(w) if w > 0.0 => {
+            if w >= 1000.0 && w % 1000.0 == 0.0 { format!("{}kW", fmt_num(w / 1000.0)) } else { format!("{}W", fmt_num(w)) }
+        }
+        _ => s.trim().to_string(),
+    }
+}
+
+/// ログの日付（yyyy/mm/dd）・時刻（HH:MM）→ ADIFの (YYYYMMDD, HHMMSS)
+fn to_adif_dt(date: &str, time: &str) -> Option<(String, String)> {
+    let d = NaiveDate::parse_from_str(date, "%Y/%m/%d").ok()?;
+    let t = chrono::NaiveTime::parse_from_str(time, "%H:%M").ok()?;
+    let ndt = d.and_time(t);
+    let n = if ADIF_UTC {
+        ndt.and_local_timezone(Local).single().map(|l| l.with_timezone(&chrono::Utc).naive_utc()).unwrap_or(ndt)
+    } else { ndt };
+    Some((n.format("%Y%m%d").to_string(), n.format("%H%M%S").to_string()))
+}
+
+/// ADIFの (YYYYMMDD, HHMM または HHMMSS) → ログの (yyyy/mm/dd, HH:MM)
+fn from_adif_dt(date: &str, time: &str) -> Option<(String, String)> {
+    let d = NaiveDate::parse_from_str(date.trim(), "%Y%m%d").ok()?;
+    let tt = time.trim();
+    if tt.is_empty() { return Some((d.format("%Y/%m/%d").to_string(), "00:00".to_string())); }
+    let t = match tt.len() {
+        4 => chrono::NaiveTime::parse_from_str(tt, "%H%M").ok()?,
+        6 => chrono::NaiveTime::parse_from_str(tt, "%H%M%S").ok()?,
+        _ => return None,
+    };
+    let ndt = d.and_time(t);
+    let n = if ADIF_UTC { ndt.and_utc().with_timezone(&Local).naive_local() } else { ndt };
+    Some((n.format("%Y/%m/%d").to_string(), n.format("%H:%M").to_string()))
+}
+
+/// ADIFの1項目を書く。長さは、UTF-8のバイト数
+fn adi_field(out: &mut String, name: &str, val: &str) {
+    if val.is_empty() { return; }
+    let v = val.replace("\r\n", "\n").replace('\n', "\r\n");
+    out.push_str(&format!("<{}:{}>{} ", name, v.len(), v));
+}
+
+/// 全記録を、日時の昇順で、ADIF（ADI形式）の文字列にする
+fn build_adi(recs: &[Record], cfg: &Config) -> String {
+    let mut o = String::new();
+    o.push_str("GOAT LOGBOOK ADIF export\r\n");
+    adi_field(&mut o, "ADIF_VER", "3.1.4");
+    adi_field(&mut o, "PROGRAMID", "GOATLOGBOOK");
+    adi_field(&mut o, "PROGRAMVERSION", env!("CARGO_PKG_VERSION"));
+    adi_field(&mut o, "CREATED_TIMESTAMP", &chrono::Utc::now().format("%Y%m%d %H%M%S").to_string());
+    o.push_str("<EOH>\r\n\r\n");
+    let my_call = cfg.my_call.trim().to_uppercase();
+    let my_gl = gl_norm(cfg.my_gl.trim());
+    let all: Vec<usize> = (0..recs.len()).collect();
+    for i in sorted(recs, all, true) {
+        let r = &recs[i];
+        let (qd, ton) = to_adif_dt(&r.date, &r.start).unwrap_or_else(|| (digits(&r.date), format!("{}00", digits(&r.start))));
+        adi_field(&mut o, "CALL", &r.call.to_uppercase());
+        adi_field(&mut o, "QSO_DATE", &qd);
+        adi_field(&mut o, "TIME_ON", &ton);
+        if !r.end.is_empty() {
+            // 終了時刻が開始時刻より前なら、日付をまたいだものとして、翌日にする
+            let ed = if r.end < r.start {
+                NaiveDate::parse_from_str(&r.date, "%Y/%m/%d").ok().and_then(|d| d.succ_opt())
+                    .map(|d| d.format("%Y/%m/%d").to_string()).unwrap_or_else(|| r.date.clone())
+            } else { r.date.clone() };
+            if let Some((d2, t2)) = to_adif_dt(&ed, &r.end) {
+                adi_field(&mut o, "QSO_DATE_OFF", &d2);
+                adi_field(&mut o, "TIME_OFF", &t2);
+            }
+        }
+        if let Some(mhz) = parse_freq_mhz(&r.freq) {
+            if let Some(b) = adif_band(mhz) { adi_field(&mut o, "BAND", b); }
+            adi_field(&mut o, "FREQ", &fmt_num(mhz));
+        }
+        adi_field(&mut o, "MODE", &r.mode.to_uppercase());
+        adi_field(&mut o, "RST_SENT", &r.rst_s);
+        adi_field(&mut o, "RST_RCVD", &r.rst_r);
+        if let Some(w) = power_to_w(&r.power) { adi_field(&mut o, "TX_PWR", &fmt_num(w)); }
+        adi_field(&mut o, "NAME", &r.name);
+        adi_field(&mut o, "QTH", &r.qth);
+        if gl_valid(&r.gl) { adi_field(&mut o, "GRIDSQUARE", &r.gl.to_uppercase()); }
+        adi_field(&mut o, "COMMENT", &r.memo);
+        adi_field(&mut o, "STATION_CALLSIGN", &my_call);
+        if gl_valid(&my_gl) { adi_field(&mut o, "MY_GRIDSQUARE", &my_gl.to_uppercase()); }
+        // このアプリ独自の項目（ADIFの決まりどおり APP_プログラム名_項目名）。他のソフトは読み飛ばします
+        adi_field(&mut o, "APP_GOATLOGBOOK_LOC", &r.loc);
+        adi_field(&mut o, "APP_GOATLOGBOOK_NUM", &r.num);
+        adi_field(&mut o, "APP_GOATLOGBOOK_SPEC", &r.spec);
+        adi_field(&mut o, "APP_GOATLOGBOOK_NGL", &r.ngl);
+        adi_field(&mut o, "APP_GOATLOGBOOK_COLOR", &r.color);
+        o.push_str("<EOR>\r\n");
+    }
+    o
+}
+
+fn find_sub(h: &[u8], n: &[u8], from: usize) -> Option<usize> {
+    h.get(from..)?.windows(n.len()).position(|w| w == n).map(|p| p + from)
+}
+fn next_ok(b: &[u8], p: usize) -> bool { p >= b.len() || matches!(b[p], b'<' | b' ' | b'\r' | b'\n' | b'\t') }
+/// UTF-8 で、長さを「文字数」として書くソフトのため：start から n 文字進んだ位置
+fn char_end(b: &[u8], start: usize, n: usize) -> usize {
+    let (mut p, mut k) = (start, 0);
+    while k < n && p < b.len() {
+        p += 1;
+        while p < b.len() && (b[p] & 0xC0) == 0x80 { p += 1; }
+        k += 1;
+    }
+    p
+}
+
+/// ADIF（ADI形式）を、1件ごとの「項目名→値」の表にする。文字コードは UTF-8 / Shift_JIS のどちらでも可
+fn parse_adi(b: &[u8]) -> Vec<HashMap<String, String>> {
+    let utf8 = std::str::from_utf8(b).is_ok();
+    let lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let mut pos = 0;
+    let (eoh, eor) = (find_sub(&lower, b"<eoh>", 0), find_sub(&lower, b"<eor>", 0));
+    if let Some(h) = eoh { if eor.map_or(true, |r| h < r) { pos = h + 5; } } // ヘッダがあれば読み飛ばす
+    let mut out = vec![];
+    let mut cur: HashMap<String, String> = HashMap::new();
+    while pos < b.len() {
+        let Some(off) = b[pos..].iter().position(|&c| c == b'<') else { break };
+        let ts = pos + off + 1;
+        let Some(te_off) = b[ts..].iter().position(|&c| c == b'>') else { break };
+        let te = ts + te_off;
+        let tag = String::from_utf8_lossy(&b[ts..te]).to_string();
+        pos = te + 1;
+        let mut it = tag.split(':');
+        let name = it.next().unwrap_or("").trim().to_uppercase();
+        match name.as_str() {
+            "EOR" => { if !cur.is_empty() { out.push(std::mem::take(&mut cur)); } continue; }
+            "EOH" | "" => continue,
+            _ => {}
+        }
+        let Some(len) = it.next().and_then(|l| l.trim().parse::<usize>().ok()) else { continue };
+        let start = pos;
+        let mut end = (start + len).min(b.len());
+        if !next_ok(b, end) && utf8 {
+            let e2 = char_end(b, start, len);
+            if next_ok(b, e2) { end = e2; }
+        }
+        cur.insert(name, decode_text(&b[start..end]));
+        pos = end;
+    }
+    if cur.contains_key("CALL") { out.push(cur); }
+    out
+}
+
+fn gv<'a>(m: &'a HashMap<String, String>, k: &str) -> &'a str { m.get(k).map(|s| s.trim()).unwrap_or("") }
+fn gv_first(m: &HashMap<String, String>, ks: &[&str]) -> String {
+    ks.iter().map(|k| gv(m, k)).find(|s| !s.is_empty()).unwrap_or("").to_string()
+}
+
+/// ADIFの1件 → ログの1件。コールサインか日付が無い（読めない）ときは None
+fn adi_to_record(m: &HashMap<String, String>, cfg: &Config) -> Option<Record> {
+    let call = gv(m, "CALL").to_uppercase();
+    if call.is_empty() { return None; }
+    let (date, start) = from_adif_dt(gv(m, "QSO_DATE"), gv(m, "TIME_ON"))?;
+    let end = {
+        let t = gv(m, "TIME_OFF");
+        if t.is_empty() { String::new() } else {
+            let d = { let x = gv(m, "QSO_DATE_OFF"); if x.is_empty() { gv(m, "QSO_DATE") } else { x } };
+            from_adif_dt(d, t).map(|(_, t)| t).unwrap_or_default()
+        }
+    };
+    // 周波数：このアプリの周波数（FREQS）の範囲に入るものは、その表記にそろえる
+    let freq = match parse_freq_mhz(gv(m, "FREQ")) {
+        Some(v) => app_freq(v).map(String::from).unwrap_or_else(|| fmt_freq(v)),
+        None => band_to_app(gv(m, "BAND")).map(String::from).unwrap_or_else(|| gv(m, "BAND").to_string()),
+    };
+    let mut mode = gv(m, "MODE").to_uppercase();
+    let sub = gv(m, "SUBMODE").to_uppercase();
+    if mode == "MFSK" && !sub.is_empty() { mode = sub; }
+    else if mode == "USB" || mode == "LSB" { mode = "SSB".to_string(); }
+    let p = gv(m, "TX_PWR");
+    let power = power_to_w(p).map(|w| power_from_w(&fmt_num(w))).unwrap_or_else(|| p.to_string());
+    let g0 = gv(m, "GRIDSQUARE");
+    let g6 = gl_norm(&g0.chars().take(6).collect::<String>());
+    let gl = if gl_valid(&g6) { g6 } else {
+        let g4 = gl_norm(&g0.chars().take(4).collect::<String>());
+        if gl_valid(&g4) { g4 } else { String::new() }
+    };
+    let ngl = gv(m, "APP_GOATLOGBOOK_NGL").to_string();
+    let (dist, bear) = calc_dist_opt(&cfg.my_gl, &gl, &ngl).unwrap_or_default();
+    Some(Record {
+        date, start, end, call,
+        rst_s: gv(m, "RST_SENT").to_string(), rst_r: gv(m, "RST_RCVD").to_string(),
+        freq, mode, power,
+        name: gv_first(m, &["NAME_INTL", "NAME"]),
+        qth: gv_first(m, &["QTH_INTL", "QTH"]),
+        memo: gv_first(m, &["COMMENT_INTL", "COMMENT", "NOTES_INTL", "NOTES"]).replace("\r\n", "\n"),
+        loc: gv(m, "APP_GOATLOGBOOK_LOC").to_string(),
+        num: gv(m, "APP_GOATLOGBOOK_NUM").to_string(),
+        spec: gv(m, "APP_GOATLOGBOOK_SPEC").to_string(),
+        gl, ngl, dist, bear,
+        color: { let c = gv(m, "APP_GOATLOGBOOK_COLOR").to_lowercase(); if matches!(c.as_str(), "red" | "yellow" | "green") { c } else { String::new() } },
+    })
+}
+
+/// ADIFファイルを読み込んで、いまの記録に追加する（ログファイルを開いていなければ、メモリ上だけ）。日付・開始時刻・コールサインが同じ記録は、重複として除く
+fn import_adi(ui: &MainWindow, s: &mut App, path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("読み込みエラー: {e}"))?;
+    let maps = parse_adi(&bytes);
+    if maps.is_empty() { return Err("ADIFの記録が見つかりません".into()); }
+    let mut seen: HashSet<(String, String, String)> =
+        s.recs.iter().map(|r| (r.date.clone(), r.start.clone(), r.call.to_uppercase())).collect();
+    let old_len = s.recs.len();
+    let (mut dup, mut bad) = (0usize, 0usize);
+    for m in &maps {
+        match adi_to_record(m, &s.cfg) {
+            None => bad += 1,
+            Some(r) => {
+                let k = (r.date.clone(), r.start.clone(), r.call.to_uppercase());
+                if seen.insert(k) { s.recs.push(r); } else { dup += 1; }
+            }
+        }
+    }
+    let added = s.recs.len() - old_len;
+    if added > 0 && s.file.is_some() {
+        if let Err(e) = persist(s) { s.recs.truncate(old_len); return Err(e); }
+    }
+    if s.file.is_none() {
+        // ログファイルを開いていないときは、記録を一覧に出すだけ（保存はしない）
+        let bk = ui.global::<Backend>();
+        let nm = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        bk.set_file_name(format!("（未保存）{nm}").into());
+        bk.set_message("".into());
+        bk.set_editing(false);
+        bk.set_screen(1);
+    }
+    refresh_list(ui, s);
+    refresh_hist(ui, s);
+    // 0件のものは、メッセージに出さない
+    let mut parts = vec![];
+    if added > 0 { parts.push(format!("{added}件を追加")); }
+    if dup > 0 { parts.push(format!("{dup}件は重複のため除外")); }
+    if bad > 0 { parts.push(format!("{bad}件は読み込めませんでした")); }
+    let mut msg = format!("ADIFをインポートしました: {}", parts.join("、"));
+    if s.file.is_none() && added > 0 { msg.push_str("（未保存です。「ファイル」→「名前を付けて保存…」で保存してください）"); }
+    Ok(msg)
+}
+
+/// 「GOAT Logbookについて」に出す文章（ビルドの情報は build.rs が埋め込む）
+fn about_text() -> String {
+    let os = match std::env::consts::OS { "windows" => "Windows", "linux" => "Linux", "macos" => "macOS", o => o };
+    let mut t = format!("Version: {} ({})\n", env!("CARGO_PKG_VERSION"), if cfg!(debug_assertions) { "debug" } else { "release" });
+    if let Some(c) = option_env!("GOAT_COMMIT") { t.push_str(&format!("Commit: {c}\n")); }
+    t.push_str(&format!("Date: {}\n", option_env!("GOAT_BUILD_DATE").unwrap_or("不明")));
+    t.push_str(&format!("Rust: {}\n", option_env!("GOAT_RUSTC").unwrap_or("不明")));
+    t.push_str(&format!("Slint: {}\n", option_env!("GOAT_SLINT").unwrap_or("不明")));
+    t.push_str(&format!("OS: {} {}", os, std::env::consts::ARCH));
+    t
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
     let mut cfg = Config::load();
@@ -1521,6 +1909,12 @@ fn main() -> Result<(), slint::PlatformError> {
         cfg.cols_ver = 3;
         cfg.save();
     }
+    // メモの列も、ドラッグで幅を変えられるようにした。保存済みの幅は、既定（半角70文字分）に戻す（1回だけ）
+    if cfg.cols_ver < 4 {
+        if cfg.cols.len() == NCOL { cfg.cols[14] = DEF_WIDTHS[14]; }
+        cfg.cols_ver = 4;
+        cfg.save();
+    }
     let colw = Rc::new(VecModel::from(col_widths(&cfg)));
     let asc = cfg.sort_asc;
     let mut last: [String; 5] = Default::default();
@@ -1528,6 +1922,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let app: Shared = Rc::new(RefCell::new(App {
         cfg, file: None, recs: vec![], colw: colw.clone(), last, editing: None, orig: None,
         hist_call: String::new(), hist_asc: asc, list_asc: asc, query: String::new(), doc: None, fonts: None,
+        msel: Rc::new(VecModel::default()), list_ids: RefCell::new(vec![]), anchor: Cell::new(0),
     }));
 
     let bk = ui.global::<Backend>();
@@ -1544,6 +1939,8 @@ fn main() -> Result<(), slint::PlatformError> {
     bk.set_my_call(app.borrow().cfg.my_call.as_str().into());
     bk.set_my_gl(app.borrow().cfg.my_gl.as_str().into());
     bk.set_col_w(ModelRc::from(colw.clone()));
+    bk.set_about_text(about_text().into());
+    bk.set_msel(ModelRc::from(app.borrow().msel.clone()));   // リストの選択行（画面と共有）
     {
         let s = app.borrow();
         set_cols(&ui, &col_order(&s.cfg), &col_flags(&s.cfg));
@@ -1754,7 +2151,7 @@ fn main() -> Result<(), slint::PlatformError> {
       bk.on_cols_changed(move || {
           let mut s = a.borrow_mut();
           s.cfg.cols = s.colw.iter().collect();
-          s.cfg.cols_ver = 3;
+          s.cfg.cols_ver = 4;
           s.cfg.save();
       }); }
 
@@ -1769,12 +2166,17 @@ fn main() -> Result<(), slint::PlatformError> {
                   }
               }
               (0, 1) => {
-                  if let Some(mut p) = rfd::FileDialog::new().add_filter("logbook", &["logbook"])
+                  if let Some(mut p) = rfd::FileDialog::new().set_title("ファイルを新規作成").add_filter("logbook", &["logbook"])
                       .set_file_name("log.logbook").save_file() {
                       if p.extension().is_none() { p.set_extension("logbook"); }
-                      if !p.exists() {
-                          if let Err(e) = fs::write(&p, "[]") { status(&ui, &format!("作成エラー: {e}")); return; }
+                      // 新規作成は、空のログファイルを作る。同名のファイルがあるときは、確認してから空にする
+                      if p.exists() {
+                          let yes = rfd::MessageDialog::new().set_title("ファイルを新規作成")
+                              .set_description("同じ名前のファイルがあります。中身を空にして、新規作成しますか？")
+                              .set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes;
+                          if !yes { return; }
                       }
+                      if let Err(e) = fs::write(&p, "[]") { status(&ui, &format!("作成エラー: {e}")); return; }
                       if let Err(e) = open_file(&ui, &mut a.borrow_mut(), p) { status(&ui, &e); }
                   }
               }
@@ -1783,7 +2185,7 @@ fn main() -> Result<(), slint::PlatformError> {
                   let mut s = a.borrow_mut();
                   let name = s.file.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string())
                       .unwrap_or_else(|| "log.logbook".to_string());
-                  if let Some(mut p) = rfd::FileDialog::new().add_filter("logbook", &["logbook"]).set_file_name(name.as_str()).save_file() {
+                  if let Some(mut p) = rfd::FileDialog::new().set_title("名前を付けて保存").add_filter("logbook", &["logbook"]).set_file_name(name.as_str()).save_file() {
                       if p.extension().is_none() { p.set_extension("logbook"); }
                       let old = s.file.replace(p.clone());
                       match persist(&s) {
@@ -1813,7 +2215,31 @@ fn main() -> Result<(), slint::PlatformError> {
                   let mut s = a.borrow_mut();
                   match open_pdf_screen(&ui, &mut s) { Ok(()) => status(&ui, ""), Err(e) => status(&ui, &e) }
               }
-              (0, 6) => { let _ = slint::quit_event_loop(); }
+              (0, 6) => {
+                  // ADIFインポート：ログファイルを開いていなくても、すぐに取り込む（記録は一覧に出る。保存は「名前を付けて保存…」）
+                  let Some(p) = rfd::FileDialog::new().set_title("ADIFファイルを選択").add_filter("ADIF", &["adi", "adif"]).pick_file() else { return };
+                  let mut s = a.borrow_mut();
+                  match import_adi(&ui, &mut s, &p) { Ok(m) => status(&ui, &m), Err(e) => status(&ui, &e) }
+              }
+              (0, 7) => {
+                  // ADIFエクスポート：全記録を、日時の昇順で書き出す
+                  let (n, name) = {
+                      let s = a.borrow();
+                      let name = s.file.as_ref().and_then(|p| p.file_stem()).map(|n| format!("{}.adi", n.to_string_lossy()))
+                          .unwrap_or_else(|| "log.adi".to_string());
+                      (s.recs.len(), name)
+                  };
+                  if n == 0 { status(&ui, "出力する記録がありません"); return; }
+                  if let Some(mut p) = rfd::FileDialog::new().add_filter("ADIF", &["adi", "adif"]).set_file_name(name.as_str()).save_file() {
+                      if p.extension().is_none() { p.set_extension("adi"); }
+                      let text = { let s = a.borrow(); build_adi(&s.recs, &s.cfg) };
+                      match fs::write(&p, text) {
+                          Ok(()) => status(&ui, &format!("ADIFを保存しました（{n}件）: {}", p.display())),
+                          Err(e) => status(&ui, &format!("保存エラー: {e}")),
+                      }
+                  }
+              }
+              (0, 9) => { let _ = slint::quit_event_loop(); }
               (2, 0) | (2, 1) => { ui.global::<Backend>().set_d_use_api(i == 0); }
               (2, 5) => { let bk = ui.global::<Backend>(); bk.set_d_dark(!bk.get_d_dark()); }
               (2, 6) => { let bk = ui.global::<Backend>(); bk.set_d_clock(!bk.get_d_clock()); }
@@ -1895,7 +2321,7 @@ fn main() -> Result<(), slint::PlatformError> {
                   let bad = invalid(&rec);
                   if !bad.is_empty() { status(&ui, &format!("形式が正しくありません: {}", bad.join("・"))); return; }
                   let old = std::mem::replace(&mut s.recs[i], rec);
-                  if let Err(e) = persist(&s) { s.recs[i] = old; status(&ui, &e); return; }
+                  if let Err(e) = persist_opt(&s) { s.recs[i] = old; status(&ui, &e); return; }
               }
               2 => {
                   if let Some(o) = s.orig.clone() { ui.global::<Form>().invoke_put((&o).into()); }
@@ -1903,7 +2329,7 @@ fn main() -> Result<(), slint::PlatformError> {
               }
               3 => {
                   let old = s.recs.remove(i);
-                  if let Err(e) = persist(&s) { s.recs.insert(i, old); status(&ui, &e); return; }
+                  if let Err(e) = persist_opt(&s) { s.recs.insert(i, old); status(&ui, &e); return; }
               }
               _ => {}
           }
@@ -1914,6 +2340,75 @@ fn main() -> Result<(), slint::PlatformError> {
           bk.set_screen(1);
           status(&ui, "");
           refresh_list(&ui, &s);
+      }); }
+
+    // 検索のカラー絞り込みボタン（検索欄の「色:赤」などを入れたり外したりする）
+    bk.on_color_toggle(|t, n| color_toggle(&t, &n).into());
+    bk.on_color_on(|t, n| color_on(&t, &n));
+
+    // 一覧の右クリック：色の変更・削除
+    // リストの選択（クリック・Ctrl＋クリック・Shift＋クリック・Ctrl＋A）
+    { let (w, a) = (ui.as_weak(), app.clone());
+      bk.on_sel_click(move |i, ctrl, shift| {
+          let ui = w.unwrap(); let s = a.borrow();
+          let n = s.msel.row_count();
+          let i = i as usize;
+          if i >= n { return; }
+          if shift {
+              let a0 = if s.anchor.get() < n { s.anchor.get() } else { i };
+              if !ctrl { for k in 0..n { s.msel.set_row_data(k, false); } }
+              for k in a0.min(i)..=a0.max(i) { s.msel.set_row_data(k, true); }
+          } else if ctrl {
+              let cur = s.msel.row_data(i).unwrap_or(false);
+              s.msel.set_row_data(i, !cur);
+              s.anchor.set(i);
+          } else {
+              for k in 0..n { s.msel.set_row_data(k, k == i); }
+              s.anchor.set(i);
+          }
+          sel_sync(&ui, &s);
+      }); }
+    { let (w, a) = (ui.as_weak(), app.clone());
+      bk.on_sel_all(move || {
+          let ui = w.unwrap(); let s = a.borrow();
+          for k in 0..s.msel.row_count() { s.msel.set_row_data(k, true); }
+          sel_sync(&ui, &s);
+      }); }
+
+    // 一覧の右クリック：色の変更・削除（複数行を選んでいるときは、選んだ行すべて）
+    { let (w, a) = (ui.as_weak(), app.clone());
+      bk.on_row_color(move |id, k| {
+          let ui = w.unwrap(); let mut s = a.borrow_mut();
+          let mut ids = sel_ids(&s);
+          if !ids.contains(&(id as usize)) { ids = vec![id as usize]; }
+          ids.retain(|&i| i < s.recs.len());
+          if ids.is_empty() { return; }
+          let c = match k { 1 => "red", 2 => "yellow", 3 => "green", _ => "" };
+          let old: Vec<(usize, String)> = ids.iter().map(|&i| (i, std::mem::replace(&mut s.recs[i].color, c.to_string()))).collect();
+          if let Err(e) = persist_opt(&s) {
+              for (i, o) in old { s.recs[i].color = o; }
+              status(&ui, &e); return;
+          }
+          let keep: HashSet<usize> = sel_ids(&s).into_iter().collect();
+          refresh_list_keep(&ui, &s, &keep); refresh_hist(&ui, &s);
+      }); }
+    { let (w, a) = (ui.as_weak(), app.clone());
+      bk.on_row_delete(move |id| {
+          let ui = w.unwrap(); let mut s = a.borrow_mut();
+          let mut ids = sel_ids(&s);
+          if !ids.contains(&(id as usize)) { ids = vec![id as usize]; }
+          ids.retain(|&i| i < s.recs.len());
+          ids.sort_unstable(); ids.dedup();
+          if ids.is_empty() { return; }
+          // 後ろの番号から消す（番号がずれないように）
+          let mut removed: Vec<(usize, Record)> = vec![];
+          for &i in ids.iter().rev() { removed.push((i, s.recs.remove(i))); }
+          if let Err(e) = persist_opt(&s) {
+              for (i, r) in removed.into_iter().rev() { s.recs.insert(i, r); }
+              status(&ui, &e); return;
+          }
+          status(&ui, &format!("{}件を削除しました", ids.len()));
+          refresh_list(&ui, &s); refresh_hist(&ui, &s);   // 選択は解除される
       }); }
 
     // 並び替え・検索
